@@ -72,6 +72,7 @@ import hashlib
 import hmac
 import io
 import re
+import time
 import urllib.request
 from datetime import datetime
 from functools import lru_cache
@@ -1825,6 +1826,397 @@ def gate_side_effects(verdict: str | None, beep: bool, nonce: str) -> None:
 </script>""",
         height=0,
     )
+
+
+# =============================================================================
+# 10b. LIVE CAMERA SCANNER
+# =============================================================================
+# Three hard browser facts drive this design. None are optional.
+#
+# 1. getUserMedia needs a SECURE CONTEXT — https:// or localhost, full stop.
+#    Opening the app on a phone at http://192.168.x.x:8501 gives a permanently
+#    dead camera and a misleading "permission denied". Deploy over https.
+#
+# 2. components.v1.html renders inside an IFRAME, and an iframe only gets the
+#    camera if the parent tags it `allow="camera"`. Streamlit does not. The
+#    iframe is same-origin though (its sandbox includes allow-same-origin —
+#    the same fact the auto-download hack already relies on), so the document
+#    reaches up, writes the attribute onto its OWN iframe element, and
+#    re-assigns srcdoc to force one silent reload. A data-attribute guard on
+#    the parent element survives that reload and prevents a loop.
+#
+# 3. components.v1.html is NOT bi-directional. `Streamlit.setComponentValue`
+#    exists only for components built with declare_component, which needs a
+#    compiled JS bundle — impossible in a single-file app. So the payload is
+#    relayed by writing into a real (off-screen) Streamlit text_input using
+#    React's native value setter, firing an input event, then clicking that
+#    form's submit. Assigning .value directly does nothing: React tracks the
+#    internal value node and silently discards the change.
+#
+# Plus one design fact: a camera re-reads the SAME QR ten times a second.
+# Unsuppressed, one guest produces one GRANTED and twenty DUPLICATE alarms —
+# which would make the duplicate detection useless exactly when it matters. So
+# the scanner freezes the frame on a hit and holds a per-payload cooldown, and
+# Python independently ignores a repeat of the same raw string.
+
+CAM_COOLDOWN_MS: Final[int] = 4000
+SCAN_COOLDOWN_S: Final[float] = 3.5
+RELAY_KEY: Final[str] = "gate_relay"
+
+_CAMERA_HTML = """
+<style>
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:transparent;
+    font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  #wrap{display:flex;flex-direction:column;align-items:center;gap:.65rem;}
+
+  /* ---- viewfinder ---- */
+  .shell{position:relative;width:100%;max-width:320px;aspect-ratio:1/1;
+    border-radius:24px;overflow:hidden;background:#05060B;
+    border:1px solid rgba(212,175,55,.45);
+    box-shadow:0 22px 54px rgba(0,0,0,.72),inset 0 1px 0 rgba(255,255,255,.06),
+               0 0 42px rgba(212,175,55,.12);}
+  #reader{position:absolute;inset:0;width:100%;height:100%;}
+  #reader video{width:100%!important;height:100%!important;
+    object-fit:cover!important;display:block;}
+  #reader img{display:none!important;}
+  #reader__dashboard{display:none!important;}
+  #reader__scan_region{height:100%!important;display:flex!important;
+    align-items:center!important;justify-content:center!important;}
+  /* html5-qrcode paints its own white scan box — we draw a better one */
+  #qr-shaded-region{border:none!important;background:transparent!important;}
+  #qr-shaded-region div{background:rgba(0,0,0,.34)!important;}
+
+  /* ---- gold corner reticle ---- */
+  .ret{position:absolute;inset:0;pointer-events:none;}
+  .ret i{position:absolute;width:36px;height:36px;border:2px solid %%GOLD%%;
+    filter:drop-shadow(0 0 6px rgba(212,175,55,.7));}
+  .ret i:nth-child(1){top:14%;left:14%;border-right:0;border-bottom:0;
+    border-radius:10px 0 0 0;}
+  .ret i:nth-child(2){top:14%;right:14%;border-left:0;border-bottom:0;
+    border-radius:0 10px 0 0;}
+  .ret i:nth-child(3){bottom:14%;left:14%;border-right:0;border-top:0;
+    border-radius:0 0 0 10px;}
+  .ret i:nth-child(4){bottom:14%;right:14%;border-left:0;border-top:0;
+    border-radius:0 0 10px 0;}
+  .line{position:absolute;left:16%;right:16%;height:2px;border-radius:2px;
+    background:linear-gradient(90deg,transparent,%%EMERALD%%,transparent);
+    box-shadow:0 0 14px %%EMERALD%%;animation:sweep 2.4s ease-in-out infinite;}
+  @keyframes sweep{0%,100%{top:17%;opacity:.15}50%{top:81%;opacity:1}}
+
+  /* ---- status chip ---- */
+  .badge{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);
+    max-width:88%;padding:.42rem .95rem;border-radius:999px;font-size:.66rem;
+    font-weight:800;letter-spacing:.14em;text-transform:uppercase;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    background:rgba(5,6,11,.86);border:1px solid rgba(212,175,55,.4);
+    color:rgba(236,231,218,.82);backdrop-filter:blur(8px);}
+  .badge.ok{border-color:%%EMERALD%%;color:%%EMERALD%%;
+    box-shadow:0 0 22px rgba(31,191,117,.4);}
+  .badge.bad{border-color:%%ALERT%%;color:%%ALERT%%;
+    box-shadow:0 0 22px rgba(255,77,94,.34);}
+  .badge.warn{border-color:%%AMBER%%;color:%%AMBER%%;}
+
+  /* capture flash */
+  .flash{position:absolute;inset:0;background:%%EMERALD%%;opacity:0;
+    pointer-events:none;}
+  .flash.go{animation:pop .42s ease-out;}
+  @keyframes pop{0%{opacity:.55}100%{opacity:0}}
+
+  /* ---- controls ---- */
+  .bar{display:flex;gap:.45rem;flex-wrap:wrap;justify-content:center;
+    width:100%;max-width:320px;}
+  .bar button{flex:1 1 0;min-width:84px;min-height:42px;padding:0 .7rem;
+    border-radius:13px;cursor:pointer;font-size:.63rem;font-weight:900;
+    letter-spacing:.16em;text-transform:uppercase;
+    color:#F2EBD9;background:rgba(212,175,55,.10);
+    border:1px solid rgba(212,175,55,.42);
+    transition:background .2s ease,border-color .2s ease,transform .1s ease;}
+  .bar button:hover{background:rgba(212,175,55,.2);
+    border-color:rgba(212,175,55,.75);}
+  .bar button:active{transform:translateY(1px);}
+  .bar button[disabled]{opacity:.34;cursor:not-allowed;}
+  .bar button.live{background:linear-gradient(135deg,#2FE08D,#0F9B5C);
+    color:#04140C;border-color:transparent;}
+  .note{font-size:.6rem;letter-spacing:.1em;line-height:1.6;text-align:center;
+    color:rgba(236,231,218,.42);max-width:320px;padding:0 .4rem;}
+  .note b{color:%%GOLD_SOFT%%;font-weight:700;}
+  @media (prefers-reduced-motion:reduce){.line{animation:none;top:49%;}}
+</style>
+
+<div id="wrap">
+  <div class="shell">
+    <div id="reader"></div>
+    <div class="ret"><i></i><i></i><i></i><i></i><div class="line"></div></div>
+    <div class="flash" id="flash"></div>
+    <div class="badge" id="badge">Preparing camera</div>
+  </div>
+  <div class="bar">
+    <button id="b-start">Start</button>
+    <button id="b-flip" disabled>Flip</button>
+    <button id="b-torch" disabled>Torch</button>
+  </div>
+  <div class="note" id="note">Hold the pass steady inside the frame.</div>
+</div>
+
+<script>
+(function () {
+  var COOLDOWN = %%COOLDOWN%%;
+  var RELAY = "%%RELAY%%";
+  var CDNS = [
+    "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js",
+    "https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"
+  ];
+
+  var badge = document.getElementById("badge");
+  var note = document.getElementById("note");
+  var flash = document.getElementById("flash");
+  var bStart = document.getElementById("b-start");
+  var bFlip = document.getElementById("b-flip");
+  var bTorch = document.getElementById("b-torch");
+
+  var qr = null, live = false, facing = "environment";
+  var torchOn = false, lastText = "", lastAt = 0;
+
+  function say(text, cls) {
+    badge.textContent = text;
+    badge.className = "badge " + (cls || "");
+  }
+  function tell(html) { note.innerHTML = html; }
+
+  /* ---------- 1. give our own iframe the camera permission policy ---------- */
+  function ownFrame() {
+    try {
+      var list = window.parent.document.getElementsByTagName("iframe");
+      for (var i = 0; i < list.length; i++) {
+        try { if (list[i].contentWindow === window) return list[i]; } catch (e) {}
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function policyReady() {
+    var f = ownFrame();
+    if (!f) return true;                       /* cross-origin: try regardless */
+    var allow = f.getAttribute("allow") || "";
+    if (allow.indexOf("camera") !== -1) return true;
+    if (f.getAttribute("data-gpl-cam") === "1") return true;   /* patched once */
+    f.setAttribute("data-gpl-cam", "1");
+    f.setAttribute("allow", "camera;microphone;fullscreen");
+    /* the attribute only binds on navigation, so re-run this document once */
+    var sd = f.getAttribute("srcdoc");
+    if (sd !== null) { f.setAttribute("srcdoc", sd); }
+    else { f.setAttribute("src", f.getAttribute("src") || ""); }
+    return false;
+  }
+
+  /* ---------- 2. hand the payload to Streamlit ---------- */
+  function relay(payload) {
+    try {
+      var W = window.parent, D = W.document;
+      var box = D.querySelector(".st-key-" + RELAY + "_field input")
+             || D.querySelector(".st-key-" + RELAY + " input");
+      if (!box) return false;
+      var proto = (W.HTMLInputElement || HTMLInputElement).prototype;
+      var setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+      setter.call(box, payload);
+      var Ev = W.Event || Event;
+      box.dispatchEvent(new Ev("input", { bubbles: true }));
+      box.dispatchEvent(new Ev("change", { bubbles: true }));
+      setTimeout(function () {
+        var btn = D.querySelector(".st-key-" + RELAY + " button");
+        if (btn) btn.click();
+      }, 140);
+      return true;
+    } catch (e) { return false; }
+  }
+
+  /* ---------- 3. a hit ---------- */
+  function onHit(text) {
+    var now = Date.now();
+    if (text === lastText && now - lastAt < COOLDOWN) return;
+    lastText = text; lastAt = now;
+
+    flash.classList.remove("go");
+    void flash.offsetWidth;
+    flash.classList.add("go");
+
+    try { qr.pause(true); } catch (e) {}
+    var short = text.length > 30 ? text.slice(0, 30) + "\\u2026" : text;
+
+    if (relay(text)) {
+      say("Captured \\u00b7 " + short, "ok");
+    } else {
+      say("Could not reach the form", "bad");
+      tell("The page did not accept the scan. Use <b>Manual override</b> below.");
+    }
+    setTimeout(function () {
+      try { qr.resume(); } catch (e) {}
+      if (live) say("Ready \\u00b7 point at a pass", "");
+    }, 2200);
+  }
+
+  /* ---------- 4. torch ---------- */
+  function torchable() {
+    try {
+      var caps = qr.getRunningTrackCapabilities();
+      return !!(caps && "torch" in caps);
+    } catch (e) { return false; }
+  }
+  function setTorch(on) {
+    try {
+      qr.applyVideoConstraints({ advanced: [{ torch: !!on }] });
+      torchOn = !!on;
+      bTorch.classList.toggle("live", torchOn);
+      return true;
+    } catch (e) { return false; }
+  }
+
+  /* ---------- 5. start / stop ---------- */
+  function boxSize(vw, vh) {
+    var m = Math.max(120, Math.floor(Math.min(vw, vh) * 0.72));
+    return { width: m, height: m };
+  }
+
+  function start() {
+    if (live) return;
+    if (!window.isSecureContext) {
+      say("HTTPS required", "bad");
+      tell("Browsers only allow the camera over <b>https</b> or localhost. "
+         + "Open the deployed https link on this phone, or use manual override.");
+      return;
+    }
+    if (!window.Html5Qrcode) { say("Scanner failed to load", "bad"); return; }
+    say("Starting camera", "");
+    bStart.disabled = true;
+
+    var cfg = { fps: 12, qrbox: boxSize, aspectRatio: 1.0,
+                disableFlip: false, useBarCodeDetectorIfSupported: true };
+    try {
+      qr = new Html5Qrcode("reader", { verbose: false });
+    } catch (e) {
+      say("Scanner failed to init", "bad"); bStart.disabled = false; return;
+    }
+
+    qr.start({ facingMode: facing }, cfg, onHit, function () {})
+      .then(function () {
+        live = true;
+        bStart.textContent = "Stop";
+        bStart.classList.add("live");
+        bStart.disabled = false;
+        bFlip.disabled = false;
+        say("Ready \\u00b7 point at a pass", "");
+        tell("Hold the pass steady inside the frame. "
+           + "Each pass is accepted <b>once</b>.");
+        setTimeout(function () {
+          if (torchable()) { bTorch.disabled = false; }
+        }, 700);
+      })
+      .catch(function (err) {
+        bStart.disabled = false;
+        var name = (err && (err.name || err.message)) || "";
+        if (/NotAllowed|Permission/i.test(name)) {
+          say("Permission denied", "bad");
+          tell("Camera access was blocked. Allow it for this site from the "
+             + "address bar, then press <b>Start</b>.");
+        } else if (/NotFound|Overconstrained|DevicesNotFound/i.test(name)) {
+          if (facing === "environment") { facing = "user"; start(); return; }
+          say("No camera found", "bad");
+          tell("This device reports no usable camera. Use <b>Manual override</b>.");
+        } else if (/NotReadable|TrackStart/i.test(name)) {
+          say("Camera is busy", "bad");
+          tell("Another app is holding the camera. Close it, then press <b>Start</b>.");
+        } else {
+          say("Camera unavailable", "bad");
+          tell("Could not open the camera (" + String(name).slice(0, 60)
+             + "). Use <b>Manual override</b>.");
+        }
+      });
+  }
+
+  function stop(cb) {
+    if (!qr || !live) { if (cb) cb(); return; }
+    live = false;
+    if (torchOn) { setTorch(false); }
+    qr.stop().then(function () {
+      try { qr.clear(); } catch (e) {}
+      bStart.textContent = "Start";
+      bStart.classList.remove("live");
+      bTorch.disabled = true;
+      bFlip.disabled = true;
+      say("Camera stopped", "warn");
+      if (cb) cb();
+    }).catch(function () { if (cb) cb(); });
+  }
+
+  bStart.addEventListener("click", function () { live ? stop() : start(); });
+  bFlip.addEventListener("click", function () {
+    facing = (facing === "environment") ? "user" : "environment";
+    stop(function () { setTimeout(start, 220); });
+  });
+  bTorch.addEventListener("click", function () { setTorch(!torchOn); });
+
+  /* release the camera if the tab is hidden or the frame is torn down */
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden && live) { stop(); }
+  });
+  window.addEventListener("pagehide", function () { try { stop(); } catch (e) {} });
+
+  /* ---------- 6. boot ---------- */
+  function loadLib(i) {
+    if (i >= CDNS.length) {
+      say("Scanner failed to load", "bad");
+      tell("The scanner library could not be fetched. Check the network, "
+         + "or use <b>Manual override</b> below.");
+      return;
+    }
+    var s = document.createElement("script");
+    s.src = CDNS[i];
+    s.onload = function () { say("Tap Start", ""); start(); };
+    s.onerror = function () { loadLib(i + 1); };
+    document.head.appendChild(s);
+  }
+
+  if (!policyReady()) { say("Preparing camera", ""); return; }
+  loadLib(0);
+})();
+</script>
+"""
+
+
+@lru_cache(maxsize=1)
+def camera_html() -> str:
+    """
+    Byte-identical on every rerun, deliberately. Streamlit only rebuilds a
+    components.html iframe when its markup changes — hand it the same string
+    and React keeps the existing element, so the camera survives the check-in
+    rerun instead of restarting (and re-prompting) after every single guest.
+    That is also why nothing dynamic may ever be interpolated in here.
+    """
+    return (_CAMERA_HTML
+            .replace("%%GOLD%%", GOLD)
+            .replace("%%GOLD_SOFT%%", GOLD_SOFT)
+            .replace("%%EMERALD%%", EMERALD)
+            .replace("%%ALERT%%", ALERT)
+            .replace("%%AMBER%%", AMBER)
+            .replace("%%COOLDOWN%%", str(CAM_COOLDOWN_MS))
+            .replace("%%RELAY%%", RELAY_KEY))
+
+
+CAMERA_OFF_HTML: Final[str] = """
+<style>
+  html,body{margin:0;padding:0;background:transparent;
+    font-family:Inter,system-ui,sans-serif;}
+  .off{display:flex;flex-direction:column;align-items:center;
+    justify-content:center;height:150px;border-radius:22px;
+    border:1px dashed rgba(212,175,55,.34);background:rgba(255,255,255,.02);
+    color:rgba(236,231,218,.44);font-size:.64rem;font-weight:800;
+    letter-spacing:.2em;text-transform:uppercase;}
+  .off span{font-size:1.7rem;margin-bottom:.5rem;filter:grayscale(1);opacity:.6;}
+</style>
+<div class="off"><span>&#128247;</span>Camera off &middot; manual entry active</div>
+"""
 
 
 # =============================================================================
