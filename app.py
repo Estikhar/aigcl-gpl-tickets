@@ -1438,6 +1438,22 @@ def inject_theme(intro: bool = False) -> None:
         -webkit-text-fill-color:rgba(245,240,228,.46) !important; }}
     .stTextInput [data-baseweb="input"] > div {{ background:transparent !important; }}
 
+    /* ============ CAMERA RELAY ============ */
+    /* The camera's landing pad. Pulled off-screen rather than display:none —
+       a clipped element still accepts programmatic input events and clicks,
+       and Streamlit still commits the form. display:none is riskier: some
+       builds skip layout for it and the click never registers. No
+       pointer-events:none either; .click() ignores it, but why risk it. */
+    .st-key-{RELAY_KEY} {{
+        position:absolute !important; left:-10000px !important; top:0 !important;
+        width:1px !important; height:1px !important;
+        overflow:hidden !important; opacity:0 !important; }}
+
+    /* The viewfinder iframe sits flush; its own gold frame lives inside. */
+    .stElementContainer:has(> iframe[title="st.iframe"]) {{ line-height:0; }}
+    iframe[title="st.iframe"] {{ border:none !important; background:transparent !important;
+        color-scheme:normal; }}
+
     /* The scanner field is emerald, not gold — the operator must never confuse
        the gate input with a guest form. */
     .st-key-gate_field .stTextInput > div > div,
@@ -1782,27 +1798,33 @@ GATE_TONES: Final[dict[str, str]] = {
 }
 
 
-def gate_side_effects(verdict: str | None, beep: bool, nonce: str) -> None:
+def gate_side_effects(verdict: str | None, beep: bool, nonce: str,
+                      focus: bool = True) -> None:
     """
     Two gate-only browser tricks in a single iframe:
-      1. Re-focus the scan field after every rerun. A hardware gun types into
-         whatever has focus; without this the operator must click the box after
-         each scan, which destroys the whole point of clear_on_submit.
+      1. Re-focus the manual field after a rerun. A hardware gun types into
+         whatever has focus; without this the operator must tap the box after
+         each scan, which destroys the point of clear_on_submit. Suppressed
+         while the camera is live — focusing a text field on a phone throws the
+         on-screen keyboard over the viewfinder.
       2. Play a verdict tone. Distinct sounds mean the operator can wave people
          through without looking at the screen.
     Both are best-effort: the iframe may be cross-origin, and browsers gate
     AudioContext behind a user gesture. Silent failure, never an exception.
     """
     tones = GATE_TONES.get(verdict or "", "[]") if beep and verdict else "[]"
+    want_focus = "1" if focus else "0"
     components_html(
         f"""<script>
 /* nonce {nonce} */
 (function(){{
   try {{
-    var d = window.parent.document;
-    var el = d.querySelector('input[aria-label="SCAN PASS"]')
-          || d.querySelector('.st-key-gate_field input');
-    if (el) {{ el.focus(); if (el.select) el.select(); }}
+    if ("{want_focus}" === "1") {{
+      var d = window.parent.document;
+      var el = d.querySelector('input[aria-label="SCAN PASS"]')
+            || d.querySelector('.st-key-gate_field input');
+      if (el) {{ el.focus(); if (el.select) el.select(); }}
+    }}
   }} catch (e) {{}}
   try {{
     var seq = {tones};
@@ -2454,80 +2476,134 @@ def render_log() -> None:
     """)
 
 
+LAST_RAW: Final[str] = "gate_last_raw"
+
+
+def process_scan(raw: str, allow_manual: bool, source: str) -> str | None:
+    """
+    Single authentication path. The camera and the manual box both land here,
+    so a payload cannot take a shortcut around the signature check.
+
+    Returns the verdict for the audio cue, or None when the scan was swallowed
+    as a repeat. Burst suppression is the important bit: a camera re-reads the
+    same QR many times a second, and without this the operator would get one
+    GRANTED followed by a wall of DUPLICATE alarms for a guest who did nothing
+    wrong. Suppressing here also spares Google Sheets a write per frame.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+
+    previous = st.session_state.get(LAST_RAW)
+    now = time.monotonic()
+    if previous and previous[0] == raw and now - previous[1] < SCAN_COOLDOWN_S:
+        st.session_state[LAST_RAW] = (raw, now)
+        return None                      # same code, still on screen — ignore
+    st.session_state[LAST_RAW] = (raw, now)
+
+    # A camera decodes QR codes; it cannot produce a bare "42". Enforcing that
+    # here rather than trusting the caller's flag means a future edit to the
+    # gate UI cannot accidentally turn the viewfinder into an unsigned-entry
+    # path — the invariant lives with the check, not with the convention.
+    if source == "camera":
+        allow_manual = False
+
+    seat, mode = resolve_scan(raw, allow_manual)
+    if seat is None:
+        result: dict[str, Any] = {
+            "verdict": INVALID, "seat_id": "", "mode": mode, "source": source,
+            "note": "Signature did not verify. This is not a pass issued by "
+                    "this system.",
+        }
+        push_log(INVALID, "", "")
+    else:
+        with st.spinner(f"Verifying {seat}…"):
+            verdict, info = mark_checkin(seat)
+        result = {"verdict": verdict, "mode": mode, "source": source, **info}
+        push_log(verdict, seat, str(info.get("name", "")))
+        if verdict == GRANTED:
+            st.session_state[LAST_GRANTED] = seat
+
+    st.session_state[SCAN_RESULT] = result
+    return str(result["verdict"])
+
+
 def render_gate(df: pd.DataFrame) -> None:
     issued = int((df["status"] == BOOKED).sum())
     arrived = int(((df["status"] == BOOKED) &
                    (df["checkin_time"].astype(str).str.strip() != "")).sum())
 
+    # ELEMENT ORDER MATTERS ABOVE THE CAMERA.
+    # Streamlit reconciles components by position. If the number of elements
+    # before the camera iframe changed between runs, React would rebuild the
+    # iframe and the camera would restart after every guest. So positions 1-2
+    # are unconditional, and every conditional block lives further down.
+
+    # -- 1. header (always rendered) ------------------------------------------
     _html(f"""
     <div class="glass" style="padding:1.2rem 1.5rem;">
       <span class="pill">GATE SCANNER</span>
       <div class="micro" style="margin-top:1rem;">
-        Point the hardware scanner at the field below and shoot. It types the
-        payload and presses Enter; the field clears itself and re-focuses for
-        the next guest. Run check-in from <b style="color:{GOLD_SOFT};">one
-        device only</b> &mdash; Google Sheets has no row locking and two
-        scanners writing in the same second will overwrite each other.
+        Point the phone at a guest's QR &mdash; check-in is automatic, no button
+        to press. Run the gate from <b style="color:{GOLD_SOFT};">one device
+        only</b>: Google Sheets has no row locking, so two phones writing in the
+        same second will overwrite each other.
       </div>
     </div>
     """)
 
-    if SALT_IS_DEFAULT:
-        st.error(
-            "`security_salt` is still the default value in the code. Every QR "
-            "signature on every pass is forgeable by anyone who has read this "
-            "repository. Set a long random `security_salt` under `[app]` in "
-            "secrets.toml, then re-issue passes before the event.", icon="🔓")
-
-    a, b, c = st.columns(3)
-    a.metric("Passes issued", issued)
-    b.metric("Checked in", arrived)
-    c.metric("Yet to arrive", max(issued - arrived, 0))
-
-    opt_a, opt_b = st.columns(2)
-    beep = opt_a.toggle("Audio feedback", value=True, key="gate_beep",
+    # -- 2. controls (always rendered, so the camera's index never moves) -----
+    opt_a, opt_b, opt_c = st.columns(3)
+    camera_on = opt_a.toggle("Camera", value=True, key="gate_camera",
+                             help="Live rear-camera scanning. Turn off to save "
+                                  "battery or when using a hardware gun.")
+    beep = opt_b.toggle("Sound", value=True, key="gate_beep",
                         help="Distinct tone per verdict. Browsers may block "
-                             "audio until you interact with the page once.")
-    allow_manual = opt_b.toggle("Allow manual pass number", value=False,
-                                key="gate_manual",
+                             "audio until you tap the page once.")
+    allow_manual = opt_c.toggle("Manual no.", value=False, key="gate_manual",
                                 help="Lets you type '42' when a QR is damaged. "
                                      "No signature is checked, so keep it off "
                                      "unless you need it.")
 
+    # -- 3. the camera -------------------------------------------------------
+    if camera_on:
+        components_html(camera_html(), height=470, scrolling=False)
+    else:
+        components_html(CAMERA_OFF_HTML, height=170, scrolling=False)
+
+    # -- 4. relay: where the camera drops its payload ------------------------
+    # Off-screen, not display:none — a clipped element still takes programmatic
+    # input events and clicks, and Streamlit still commits the form.
+    with st.container(key=RELAY_KEY):
+        with st.form("gate_relay_form", clear_on_submit=True, border=False):
+            cam_raw = st.text_input("Camera relay", key=f"{RELAY_KEY}_field",
+                                    label_visibility="collapsed")
+            cam_submitted = st.form_submit_button("relay")
+
+    # -- 5. manual override --------------------------------------------------
     with st.container(key="gate_form"):
         with st.form("gate_scan", clear_on_submit=True, border=False):
             raw = st.text_input(
                 "SCAN PASS", key="gate_field",
                 placeholder="VALIDATE|Pass-1|A1B2C3D4E5",
-                label_visibility="visible",
+                help="Backup path: paste a payload, type a pass number with "
+                     "manual mode on, or fire a hardware scanner into it.",
             )
-            scanned = st.form_submit_button("CHECK IN", type="primary")
+            scanned = st.form_submit_button("CHECK IN MANUALLY", type="primary")
 
+    # -- 6. authenticate -----------------------------------------------------
     verdict_for_tone: str | None = None
-
-    if scanned:
-        raw = (raw or "").strip()
-        if not raw:
+    if cam_submitted:
+        # A camera only ever produces a signed payload, so manual bare numbers
+        # are never honoured on this path regardless of the toggle.
+        verdict_for_tone = process_scan(cam_raw, False, "camera")
+    elif scanned:
+        if not (raw or "").strip():
             st.session_state[SCAN_RESULT] = None
         else:
-            seat, mode = resolve_scan(raw, allow_manual)
-            if seat is None:
-                result: dict[str, Any] = {
-                    "verdict": INVALID, "seat_id": "", "mode": mode,
-                    "note": "Signature did not verify. This is not a pass issued "
-                            "by this system.",
-                }
-                push_log(INVALID, "", "")
-            else:
-                with st.spinner(f"Verifying {seat}…"):
-                    verdict, info = mark_checkin(seat)
-                result = {"verdict": verdict, "mode": mode, **info}
-                push_log(verdict, seat, str(info.get("name", "")))
-                if verdict == GRANTED:
-                    st.session_state[LAST_GRANTED] = seat
-            st.session_state[SCAN_RESULT] = result
-            verdict_for_tone = result["verdict"]
+            verdict_for_tone = process_scan(raw, allow_manual, "manual")
 
+    # -- 7. verdict ----------------------------------------------------------
     result = st.session_state.get(SCAN_RESULT)
     if result:
         render_verdict(result)
@@ -2538,20 +2614,40 @@ def render_gate(df: pd.DataFrame) -> None:
                 ok, message = undo_checkin(str(result["seat_id"]))
                 st.session_state[SCAN_RESULT] = None
                 st.session_state.pop(LAST_GRANTED, None)
+                st.session_state.pop(LAST_RAW, None)
                 (st.success if ok else st.error)(message)
                 st.rerun()
     else:
         _html("""
-        <div class="glass" style="text-align:center;padding:2.2rem 1.4rem;">
+        <div class="glass" style="text-align:center;padding:2rem 1.4rem;">
           <div style="font-size:2.6rem;line-height:1;">🎟️</div>
           <div class="micro" style="margin-top:.8rem;">
-            Ready to scan. The verdict appears here and stays until the next pass.
+            Ready. The verdict appears here and stays until the next pass.
           </div>
         </div>
         """)
 
+    # -- 8. counters, warnings, log (conditional blocks live below the camera)
+    a, b, c = st.columns(3)
+    a.metric("Passes issued", issued)
+    b.metric("Checked in", arrived)
+    c.metric("Yet to arrive", max(issued - arrived, 0))
+
+    if SALT_IS_DEFAULT:
+        st.error(
+            "`security_salt` is still the default value in the code. Every QR "
+            "signature on every pass is forgeable by anyone who has read this "
+            "repository. Set a long random `security_salt` under `[app]` in "
+            "secrets.toml, then re-issue passes before the event.", icon="🔓")
+
     render_log()
-    gate_side_effects(verdict_for_tone, beep, nonce=f"{clock_ist()}-{len(st.session_state.get(SCAN_LOG, []))}")
+
+    # Focusing the manual box pops the on-screen keyboard over the viewfinder,
+    # so it is only done when the camera is off.
+    gate_side_effects(
+        verdict_for_tone, beep, focus=not camera_on,
+        nonce=f"{clock_ist()}-{len(st.session_state.get(SCAN_LOG, []))}",
+    )
 
 
 def guest_table(df: pd.DataFrame) -> pd.DataFrame:
