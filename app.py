@@ -1964,6 +1964,9 @@ _CAMERA_HTML = """
   .note{font-size:.6rem;letter-spacing:.1em;line-height:1.6;text-align:center;
     color:rgba(236,231,218,.42);max-width:320px;padding:0 .4rem;}
   .note b{color:%%GOLD_SOFT%%;font-weight:700;}
+  .diag{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:.55rem;letter-spacing:.06em;color:rgba(212,175,55,.5);
+    text-align:center;max-width:320px;word-break:break-all;}
   @media (prefers-reduced-motion:reduce){.line{animation:none;top:49%;}}
 </style>
 
@@ -1980,6 +1983,7 @@ _CAMERA_HTML = """
     <button id="b-torch" disabled>Torch</button>
   </div>
   <div class="note" id="note">Hold the pass steady inside the frame.</div>
+  <div class="diag" id="diag">relay: idle</div>
 </div>
 
 <script>
@@ -2006,6 +2010,13 @@ _CAMERA_HTML = """
     badge.className = "badge " + (cls || "");
   }
   function tell(html) { note.innerHTML = html; }
+  /* Names the exact stage that failed. A scanner that silently does nothing is
+     undebuggable at a venue; a scanner that says "relay field not found" is a
+     two-minute fix. */
+  function diag(text) {
+    var el = document.getElementById("diag");
+    if (el) el.textContent = "relay: " + text;
+  }
 
   /* ---------- 1. give our own iframe the camera permission policy ---------- */
   function ownFrame() {
@@ -2033,25 +2044,108 @@ _CAMERA_HTML = """
     return false;
   }
 
-  /* ---------- 2. hand the payload to Streamlit ---------- */
+  /* ---------- 2. hand the payload to Streamlit ----------
+     THE SUBTLE PART, and the reason a naive version scans but never verifies.
+
+     Streamlit's text_input inside a form does NOT push each keystroke to its
+     widget manager. onChange only marks the component "dirty" and parks the
+     text in local React state; the value is committed on blur, on Enter, or
+     when the focused field loses focus to the submit button. A programmatic
+     .click() blurs nothing — the field was never focused — so submitForm ships
+     the PREVIOUS committed value, i.e. the empty string. The scan then arrives
+     server-side as "", process_scan() drops it, and the page reruns with no
+     verdict at all. Camera fine, decode fine, nothing on screen.
+
+     So the value has to be committed explicitly, three independent ways,
+     because which one a given Streamlit build honours varies:
+       focus -> native setter -> input/change -> Enter -> blur -> click.
+     Any one of those committing is enough; the rest are harmless no-ops. */
+
+  function relayTargets() {
+    var W = window.parent, D = W.document;
+    return {
+      W: W, D: D,
+      box: D.querySelector(".st-key-" + RELAY + "_field input")
+        || D.querySelector(".st-key-" + RELAY + " input"),
+      btn: D.querySelector(".st-key-" + RELAY + " button")
+    };
+  }
+
+  function writeInto(t, box, payload) {
+    var proto = (t.W.HTMLInputElement || HTMLInputElement).prototype;
+    var setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+    var Ev = t.W.Event || Event;
+    var KEv = t.W.KeyboardEvent || KeyboardEvent;
+
+    try { box.focus(); } catch (e) {}
+    setter.call(box, payload);
+    box.dispatchEvent(new Ev("input", { bubbles: true }));
+    box.dispatchEvent(new Ev("change", { bubbles: true }));
+
+    /* Enter commits the value AND submits the form in one go */
+    ["keydown", "keypress", "keyup"].forEach(function (type) {
+      try {
+        box.dispatchEvent(new KEv(type, {
+          key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true
+        }));
+      } catch (e) {}
+    });
+    /* blur commits on builds that ignore synthetic key events */
+    try { box.blur(); } catch (e) {}
+  }
+
   function relay(payload) {
-    try {
-      var W = window.parent, D = W.document;
-      var box = D.querySelector(".st-key-" + RELAY + "_field input")
-             || D.querySelector(".st-key-" + RELAY + " input");
-      if (!box) return false;
-      var proto = (W.HTMLInputElement || HTMLInputElement).prototype;
-      var setter = Object.getOwnPropertyDescriptor(proto, "value").set;
-      setter.call(box, payload);
-      var Ev = W.Event || Event;
-      box.dispatchEvent(new Ev("input", { bubbles: true }));
-      box.dispatchEvent(new Ev("change", { bubbles: true }));
+    var t;
+    try { t = relayTargets(); }
+    catch (e) { diag("parent blocked (cross-origin)"); return false; }
+
+    if (!t.box) { diag("relay field not found"); return false; }
+    writeInto(t, t.box, payload);
+    diag("committed \\u2192 waiting for Streamlit");
+
+    /* and finally the button, in case neither Enter nor blur committed */
+    setTimeout(function () {
+      try {
+        var again = relayTargets();
+        if (again.btn) again.btn.click();
+      } catch (e) {}
+    }, 110);
+
+    /* Did it land? clear_on_submit empties the field on a successful rerun,
+       so an unchanged field means Streamlit never took it. Fall back to the
+       visible manual box, which is a completely different DOM path. */
+    setTimeout(function () { confirm(payload, 0); }, 900);
+    return true;
+  }
+
+  function confirm(payload, tries) {
+    var t;
+    try { t = relayTargets(); } catch (e) { return; }
+    if (!t.box || t.box.value !== payload) { diag("delivered"); return; }
+    if (tries < 2) {
+      writeInto(t, t.box, payload);
       setTimeout(function () {
-        var btn = D.querySelector(".st-key-" + RELAY + " button");
-        if (btn) btn.click();
-      }, 140);
-      return true;
-    } catch (e) { return false; }
+        try { var a = relayTargets(); if (a.btn) a.btn.click(); } catch (e) {}
+      }, 110);
+      setTimeout(function () { confirm(payload, tries + 1); }, 900);
+      return;
+    }
+    /* last resort: drive the visible manual override field instead */
+    try {
+      var D = window.parent.document;
+      var mbox = D.querySelector(".st-key-gate_field input");
+      var mbtn = D.querySelector(".st-key-gate_form button");
+      if (mbox) {
+        writeInto({ W: window.parent, D: D }, mbox, payload);
+        setTimeout(function () { if (mbtn) mbtn.click(); }, 120);
+        diag("used manual field fallback");
+        return;
+      }
+    } catch (e) {}
+    diag("Streamlit did not accept the value");
+    say("Relay blocked", "bad");
+    tell("The scan decoded but the page would not take it. "
+       + "Use <b>Manual override</b> and tell the developer: relay-no-commit.");
   }
 
   /* ---------- 3. a hit ---------- */
@@ -2476,6 +2570,83 @@ def render_log() -> None:
     """)
 
 
+def salt_fingerprint() -> str:
+    """
+    A short, non-reversible tag for the active salt. Never reveals the salt, but
+    lets you tell at a glance whether it changed since the passes were printed —
+    which is the other way a perfectly good QR reads INVALID at the gate.
+    """
+    return hashlib.sha256(("fingerprint|" + SECURITY_SALT).encode("utf-8")
+                          ).hexdigest()[:8].upper()
+
+
+def explain_payload(raw: str) -> list[tuple[str, bool, str]]:
+    """
+    Step-by-step account of why a scanned string was accepted or rejected.
+    Returns (step, passed, detail). This exists because "invalid pass" on its
+    own is useless at 6pm with a queue building — the operator needs to know
+    whether it is a fake, a smudged scan, or a salt that changed after printing.
+    """
+    steps: list[tuple[str, bool, str]] = []
+    raw = (raw or "").strip()
+
+    steps.append(("Something arrived at the server", bool(raw),
+                  f"{len(raw)} characters"))
+    if not raw:
+        steps.append(("Diagnosis", False,
+                      "The field reached the server empty. The camera decoded "
+                      "but the value was not committed — a relay problem, not "
+                      "a pass problem."))
+        return steps
+
+    match = SCAN_RE.match(raw)
+    steps.append(("Matches VALIDATE|pass|signature", bool(match),
+                  "" if match else "Not a payload this app prints."))
+    if not match:
+        bare = normalise_seat(raw)
+        steps.append(("Looks like a bare pass number", bare is not None,
+                      bare or "no"))
+        steps.append(("Diagnosis", False,
+                      "Accepted only with 'Manual no.' switched on, since "
+                      "nothing about a bare number can be verified."
+                      if bare else
+                      "This QR was not produced by this system."))
+        return steps
+
+    seat = normalise_seat(match.group(1))
+    steps.append((f"Pass number within 1–{TOTAL_PASSES}", seat is not None,
+                  seat or match.group(1)))
+    if seat is None:
+        return steps
+
+    expected = security_hash(seat)
+    carried = match.group(2).upper()
+    ok = hmac.compare_digest(expected, carried)
+    steps.append(("Signature matches the current security_salt", ok,
+                  f"pass carries {carried} · this salt produces {expected}"))
+    if not ok:
+        steps.append(("Diagnosis", False,
+                      "The pass is well-formed but signed with a DIFFERENT "
+                      "salt. Almost always this means `security_salt` was "
+                      "changed after these passes were issued. Restore the "
+                      "old salt, or reset the database and re-issue."))
+    else:
+        steps.append(("Diagnosis", True,
+                      "Signature is valid. Any rejection now comes from the "
+                      "sheet: unissued pass, or already checked in."))
+    return steps
+
+
+LAST_SEEN: Final[str] = "gate_last_seen"
+
+
+def note_arrival(raw: str, source: str) -> None:
+    """Record what actually reached the server, empty strings included."""
+    st.session_state[LAST_SEEN] = {
+        "raw": raw or "", "source": source, "at": clock_ist(),
+    }
+
+
 LAST_RAW: Final[str] = "gate_last_raw"
 
 
@@ -2594,10 +2765,12 @@ def render_gate(df: pd.DataFrame) -> None:
     # -- 6. authenticate -----------------------------------------------------
     verdict_for_tone: str | None = None
     if cam_submitted:
+        note_arrival(cam_raw, "camera")
         # A camera only ever produces a signed payload, so manual bare numbers
         # are never honoured on this path regardless of the toggle.
         verdict_for_tone = process_scan(cam_raw, False, "camera")
     elif scanned:
+        note_arrival(raw, "manual")
         if not (raw or "").strip():
             st.session_state[SCAN_RESULT] = None
         else:
@@ -2641,6 +2814,28 @@ def render_gate(df: pd.DataFrame) -> None:
             "secrets.toml, then re-issue passes before the event.", icon="🔓")
 
     render_log()
+
+    # -- 9. diagnostics ------------------------------------------------------
+    # Turns "it scans but nothing happens" into a one-line answer: either
+    # nothing reached the server (relay problem) or something did and the
+    # signature failed (salt problem).
+    with st.expander("Scan diagnostics"):
+        seen = st.session_state.get(LAST_SEEN)
+        if not seen:
+            st.caption(
+                "Nothing has reached the server yet. If the viewfinder shows "
+                "CAPTURED but this stays empty, the payload is not being "
+                "committed — check the small `relay:` line under the camera."
+            )
+        else:
+            st.caption(f"Last value received · {seen['at']} · via {seen['source']}")
+            st.code(seen["raw"] or "(empty string)", language="text")
+            for step, ok, detail in explain_payload(seen["raw"]):
+                st.markdown(f"{'✅' if ok else '❌'} **{step}**"
+                            + (f" — {detail}" if detail else ""))
+        st.caption(f"Active salt fingerprint: `{salt_fingerprint()}` — if this "
+                   "changed since the passes were printed, every QR will read "
+                   "as invalid.")
 
     # Focusing the manual box pops the on-screen keyboard over the viewfinder,
     # so it is only done when the camera is off.
@@ -2739,9 +2934,22 @@ def render_database(df: pd.DataFrame) -> None:
         st.rerun()
 
     st.divider()
+    st.subheader("Scan doctor", divider=False)
+    st.caption("Paste any scanned payload to see exactly why it passes or fails. "
+               "Use it to test the scanner before doors open.")
+    probe = st.text_input("Payload", key="doctor_payload",
+                          placeholder="VALIDATE|Pass-1|A1B2C3D4E5",
+                          label_visibility="collapsed")
+    if probe.strip():
+        for step, ok, detail in explain_payload(probe):
+            st.markdown(f"{'✅' if ok else '❌'} **{step}**"
+                        + (f" — {detail}" if detail else ""))
+
+    st.divider()
     st.caption("Signature self-test — these are the exact payloads encoded into "
-               "the first three QRs. Useful for testing a scanner before doors open.")
+               "the first three QRs. Scan a real pass and compare.")
     st.code("\n".join(gate_payload(s) for s in SEAT_ORDER[:3]), language="text")
+    st.caption(f"Active salt fingerprint: `{salt_fingerprint()}`")
 
 
 def render_admin(df: pd.DataFrame) -> None:
