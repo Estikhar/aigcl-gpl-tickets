@@ -1914,18 +1914,19 @@ _CAMERA_HTML = """
   .ret{position:absolute;inset:0;pointer-events:none;}
   .ret i{position:absolute;width:36px;height:36px;border:2px solid %%GOLD%%;
     filter:drop-shadow(0 0 6px rgba(212,175,55,.7));}
-  .ret i:nth-child(1){top:14%;left:14%;border-right:0;border-bottom:0;
+  .ret i:nth-child(1){top:7%;left:7%;border-right:0;border-bottom:0;
     border-radius:10px 0 0 0;}
-  .ret i:nth-child(2){top:14%;right:14%;border-left:0;border-bottom:0;
+  .ret i:nth-child(2){top:7%;right:7%;border-left:0;border-bottom:0;
     border-radius:0 10px 0 0;}
-  .ret i:nth-child(3){bottom:14%;left:14%;border-right:0;border-top:0;
+  .ret i:nth-child(3){bottom:7%;left:7%;border-right:0;border-top:0;
     border-radius:0 0 0 10px;}
-  .ret i:nth-child(4){bottom:14%;right:14%;border-left:0;border-top:0;
+  .ret i:nth-child(4){bottom:7%;right:7%;border-left:0;border-top:0;
     border-radius:0 0 10px 0;}
-  .line{position:absolute;left:16%;right:16%;height:2px;border-radius:2px;
+  .line{position:absolute;left:9%;right:9%;height:2px;border-radius:2px;
     background:linear-gradient(90deg,transparent,%%EMERALD%%,transparent);
     box-shadow:0 0 14px %%EMERALD%%;animation:sweep 2.4s ease-in-out infinite;}
-  @keyframes sweep{0%,100%{top:17%;opacity:.15}50%{top:81%;opacity:1}}
+  @keyframes sweep{0%,100%{top:10%;opacity:.15}50%{top:88%;opacity:1}}
+  #shot{display:none;}
 
   /* ---- status chip ---- */
   .badge{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);
@@ -1981,7 +1982,9 @@ _CAMERA_HTML = """
     <button id="b-start">Start</button>
     <button id="b-flip" disabled>Flip</button>
     <button id="b-torch" disabled>Torch</button>
+    <button id="b-shot">Photo</button>
   </div>
+  <input type="file" accept="image/*" capture="environment" id="shot">
   <div class="note" id="note">Hold the pass steady inside the frame.</div>
   <div class="diag" id="diag">relay: idle</div>
 </div>
@@ -2001,6 +2004,7 @@ _CAMERA_HTML = """
   var bStart = document.getElementById("b-start");
   var bFlip = document.getElementById("b-flip");
   var bTorch = document.getElementById("b-torch");
+  var bShot = document.getElementById("b-shot");
 
   var qr = null, live = false, facing = "environment";
   var torchOn = false, lastText = "", lastAt = 0;
@@ -2190,9 +2194,20 @@ _CAMERA_HTML = """
   }
 
   /* ---------- 5. start / stop ---------- */
-  function boxSize(vw, vh) {
-    var m = Math.max(120, Math.floor(Math.min(vw, vh) * 0.72));
-    return { width: m, height: m };
+  var frames = 0, lastTick = 0;
+
+  /* html5-qrcode calls this on EVERY frame that contains no code. That makes
+     it the proof-of-life for the decode loop: a climbing count means the
+     camera and the scanner are both fine and it is purely a framing problem,
+     while a stuck count means the loop itself died. Without this the operator
+     just sees "relay: idle" forever and has no idea which half is broken. */
+  function onScanFail() {
+    frames++;
+    var now = Date.now();
+    if (now - lastTick > 1000) {
+      lastTick = now;
+      diag("scanning \\u00b7 " + frames + " frames \\u00b7 no code yet");
+    }
   }
 
   function start() {
@@ -2207,24 +2222,44 @@ _CAMERA_HTML = """
     say("Starting camera", "");
     bStart.disabled = true;
 
-    var cfg = { fps: 12, qrbox: boxSize, aspectRatio: 1.0,
-                disableFlip: false, useBarCodeDetectorIfSupported: true };
+    /* NO qrbox — and that is the whole point.
+       html5-qrcode CROPS each frame down to qrbox before it even tries to
+       decode. A centred 72% box sounds helpful and is actively harmful: hold a
+       pass close enough to be sharp and the QR overflows the box, hold it far
+       enough to fit and the modules are too small to resolve. Either way the
+       decoder never sees a complete code and the scanner appears dead while
+       the video looks perfect. Omitting qrbox scans the entire frame, so
+       whatever the operator can see is what gets decoded. */
+    var cfg = { fps: 10, disableFlip: false,
+                useBarCodeDetectorIfSupported: true };
     try {
       qr = new Html5Qrcode("reader", { verbose: false });
     } catch (e) {
       say("Scanner failed to init", "bad"); bStart.disabled = false; return;
     }
 
-    qr.start({ facingMode: facing }, cfg, onHit, function () {})
+    qr.start({ facingMode: facing }, cfg, onHit, onScanFail)
       .then(function () {
         live = true;
+        frames = 0;
         bStart.textContent = "Stop";
         bStart.classList.add("live");
         bStart.disabled = false;
         bFlip.disabled = false;
         say("Ready \\u00b7 point at a pass", "");
-        tell("Hold the pass steady inside the frame. "
-           + "Each pass is accepted <b>once</b>.");
+        tell("Fill about <b>half the frame</b> with the QR. The whole view is "
+           + "scanned, so it does not need to sit in the corners.");
+        diag("scanning \\u00b7 waiting for a code");
+        /* A sharper, larger feed decodes a printed pass from much further out,
+           and continuous focus is what makes close-up scans resolve at all.
+           Both are best-effort: iOS ignores focusMode, older Android ignores
+           the resolution hint, and neither failing matters. */
+        try {
+          qr.applyVideoConstraints({
+            width: { ideal: 1280 }, height: { ideal: 720 },
+            advanced: [{ focusMode: "continuous" }]
+          });
+        } catch (e) {}
         setTimeout(function () {
           if (torchable()) { bTorch.disabled = false; }
         }, 700);
@@ -2266,15 +2301,53 @@ _CAMERA_HTML = """
     }).catch(function () { if (cb) cb(); });
   }
 
-  bStart.addEventListener("click", function () { live ? stop() : start(); });
-  bFlip.addEventListener("click", function () {
+  /* Bind defensively. Every listener below lives in one IIFE, so a single null
+     element — a renamed id, a trimmed control — would throw and take the whole
+     scanner down with it, camera included. A dead Photo button is survivable;
+     a dead scanner at the gate is not. */
+  function on(el, ev, fn) {
+    if (el && el.addEventListener) { el.addEventListener(ev, fn); }
+  }
+
+  on(bStart, "click", function () { live ? stop() : start(); });
+  on(bFlip, "click", function () {
     facing = (facing === "environment") ? "user" : "environment";
     stop(function () { setTimeout(start, 220); });
   });
-  bTorch.addEventListener("click", function () { setTorch(!torchOn); });
+  on(bTorch, "click", function () { setTorch(!torchOn); });
+
+  /* ---------- 5b. photo fallback ----------
+     A still photo is captured at the sensor's full resolution rather than the
+     downscaled preview stream, and it is sharp rather than motion-blurred, so
+     it decodes passes the live loop cannot — a glossy print under a spotlight,
+     a dim lobby, a screen with moire. It is the guaranteed path: if this fails
+     the QR genuinely is unreadable, and the operator falls back to typing. */
+  var shot = document.getElementById("shot");
+  on(bShot, "click", function () { if (shot) shot.click(); });
+  on(shot, "change", function () {
+    var file = shot.files && shot.files[0];
+    shot.value = "";
+    if (!file) return;
+    if (!window.Html5Qrcode) { say("Scanner not loaded", "bad"); return; }
+    say("Reading photo", "");
+    diag("decoding still image");
+
+    function decode() {
+      var inst = qr || new Html5Qrcode("reader", { verbose: false });
+      inst.scanFile(file, false)
+        .then(function (text) { lastText = ""; onHit(text); })
+        .catch(function () {
+          say("No QR in that photo", "bad");
+          tell("Nothing readable found. Get closer, hold steady, and avoid "
+             + "glare on the pass.");
+          diag("still image: no code");
+        });
+    }
+    if (live) { stop(decode); } else { decode(); }
+  });
 
   /* release the camera if the tab is hidden or the frame is torn down */
-  document.addEventListener("visibilitychange", function () {
+  on(document, "visibilitychange", function () {
     if (document.hidden && live) { stop(); }
   });
   window.addEventListener("pagehide", function () { try { stop(); } catch (e) {} });
