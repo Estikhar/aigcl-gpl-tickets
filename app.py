@@ -672,7 +672,11 @@ def qr_image(payload: str, edge_px: int) -> Image.Image:
     a hand-held scan needs. NEAREST resize keeps module edges razor sharp;
     LANCZOS would blur them into grey mush.
     """
-    qr = qrcode.QRCode(version=None, box_size=10, border=3,
+    # border=4 is the spec minimum quiet zone. It was 3, which decodes fine on
+    # a flat scan but leaves nothing to spare when an operator fills the
+    # viewfinder edge-to-edge and the camera clips the white margin — the
+    # decoder then cannot locate the finder patterns at all.
+    qr = qrcode.QRCode(version=None, box_size=10, border=4,
                        error_correction=qrcode.constants.ERROR_CORRECT_L)
     qr.add_data(payload)
     qr.make(fit=True)
@@ -681,11 +685,11 @@ def qr_image(payload: str, edge_px: int) -> Image.Image:
 
 
 def qr_px_per_module(payload: str, edge_px: int = round(QR_PX * OUT_SCALE)) -> float:
-    probe = qrcode.QRCode(version=None, box_size=1, border=3,
+    probe = qrcode.QRCode(version=None, box_size=1, border=4,
                           error_correction=qrcode.constants.ERROR_CORRECT_L)
     probe.add_data(payload)
     probe.make(fit=True)
-    total = probe.modules_count + 6
+    total = probe.modules_count + 8
     return edge_px / total if total else 0.0
 
 
@@ -1950,7 +1954,7 @@ _CAMERA_HTML = """
   /* ---- controls ---- */
   .bar{display:flex;gap:.45rem;flex-wrap:wrap;justify-content:center;
     width:100%;max-width:320px;}
-  .bar button{flex:1 1 0;min-width:84px;min-height:42px;padding:0 .7rem;
+  .bar button{flex:1 1 0;min-width:66px;min-height:42px;padding:0 .5rem;
     border-radius:13px;cursor:pointer;font-size:.63rem;font-weight:900;
     letter-spacing:.16em;text-transform:uppercase;
     color:#F2EBD9;background:rgba(212,175,55,.10);
@@ -1962,6 +1966,9 @@ _CAMERA_HTML = """
   .bar button[disabled]{opacity:.34;cursor:not-allowed;}
   .bar button.live{background:linear-gradient(135deg,#2FE08D,#0F9B5C);
     color:#04140C;border-color:transparent;}
+  /* the fallback that always works, so it must not look like an afterthought */
+  #b-shot{border-color:rgba(212,175,55,.85);background:rgba(212,175,55,.2);
+    color:%%GOLD_SOFT%%;}
   .note{font-size:.6rem;letter-spacing:.1em;line-height:1.6;text-align:center;
     color:rgba(236,231,218,.42);max-width:320px;padding:0 .4rem;}
   .note b{color:%%GOLD_SOFT%%;font-weight:700;}
@@ -2208,6 +2215,14 @@ _CAMERA_HTML = """
       lastTick = now;
       diag("scanning \\u00b7 " + frames + " frames \\u00b7 no code yet");
     }
+    /* ~6 seconds of clean frames with nothing decoded is almost always the
+       operator holding the pass too close, so the white quiet zone around the
+       QR is cropped by the frame edge and the finder patterns cannot be
+       located. Coach it rather than sit there silently saying READY. */
+    if (frames === 60) {
+      tell("Not reading. Move the phone <b>back</b> until the whole QR and its "
+         + "white border are inside the view \\u2014 or just tap <b>PHOTO</b>.");
+    }
   }
 
   function start() {
@@ -2247,8 +2262,9 @@ _CAMERA_HTML = """
         bStart.disabled = false;
         bFlip.disabled = false;
         say("Ready \\u00b7 point at a pass", "");
-        tell("Fill about <b>half the frame</b> with the QR. The whole view is "
-           + "scanned, so it does not need to sit in the corners.");
+        tell("Fill about <b>half the frame</b> \\u2014 the whole QR plus a little "
+           + "white margin must be visible. If it will not read, tap "
+           + "<b>PHOTO</b>.");
         diag("scanning \\u00b7 waiting for a code");
         /* A sharper, larger feed decodes a printed pass from much further out,
            and continuous focus is what makes close-up scans resolve at all.
@@ -2720,6 +2736,24 @@ def note_arrival(raw: str, source: str) -> None:
     }
 
 
+def reload_seats(fallback: pd.DataFrame) -> pd.DataFrame:
+    """
+    Re-read after the gate may have written.
+
+    main() loads the sheet once, at the top, and hands that frame to every tab.
+    But the gate tab renders FIRST and writes a check-in during that same run,
+    so the guest list and the counters further down were rendering data from
+    before the write — a check-in that had genuinely been saved still showed as
+    "not arrived" until the next interaction. Reads are cached for STATS_TTL and
+    save_seats() clears that cache, so this is free when nothing changed and
+    correct when something did.
+    """
+    try:
+        return load_seats()
+    except Exception:                        # noqa: BLE001 — keep the tab alive
+        return fallback
+
+
 LAST_RAW: Final[str] = "gate_last_raw"
 
 
@@ -2773,9 +2807,9 @@ def process_scan(raw: str, allow_manual: bool, source: str) -> str | None:
 
 
 def render_gate(df: pd.DataFrame) -> None:
-    issued = int((df["status"] == BOOKED).sum())
-    arrived = int(((df["status"] == BOOKED) &
-                   (df["checkin_time"].astype(str).str.strip() != "")).sum())
+    # Counters are deliberately NOT computed here. A check-in written further
+    # down this function would make them stale on the very run that mattered,
+    # so they are read fresh in step 8 instead.
 
     # ELEMENT ORDER MATTERS ABOVE THE CAMERA.
     # Streamlit reconciles components by position. If the number of elements
@@ -2811,7 +2845,7 @@ def render_gate(df: pd.DataFrame) -> None:
 
     # -- 3. the camera -------------------------------------------------------
     if camera_on:
-        components_html(camera_html(), height=470, scrolling=False)
+        components_html(camera_html(), height=520, scrolling=False)
     else:
         components_html(CAMERA_OFF_HTML, height=170, scrolling=False)
 
@@ -2874,6 +2908,13 @@ def render_gate(df: pd.DataFrame) -> None:
         """)
 
     # -- 8. counters, warnings, log (conditional blocks live below the camera)
+    # Re-read: a check-in was very likely just written a few lines above, and
+    # the frame main() handed us predates it.
+    df = reload_seats(df)
+    issued = int((df["status"] == BOOKED).sum())
+    arrived = int(((df["status"] == BOOKED) &
+                   (df["checkin_time"].astype(str).str.strip() != "")).sum())
+
     a, b, c = st.columns(3)
     a.metric("Passes issued", issued)
     b.metric("Checked in", arrived)
@@ -3031,9 +3072,10 @@ def render_admin(df: pd.DataFrame) -> None:
     with gate_tab:
         render_gate(df)
     with list_tab:
-        render_guest_list(df)
+        # The gate tab rendered first and may have just written a check-in.
+        render_guest_list(reload_seats(df))
     with db_tab:
-        render_database(df)
+        render_database(reload_seats(df))
 
 
 # =============================================================================
