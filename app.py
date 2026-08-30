@@ -1686,14 +1686,30 @@ def render_top_branding() -> None:
 
 
 def render_sponsors() -> None:
-    """Renders 5 sponsor images side-by-side (scaled proportionally)."""
+    """Renders 5 sponsor images side-by-side (forced single row on mobile)."""
     sponsor_paths = [BASE_DIR / f"sponsor{i}.png" for i in range(1, 6)]
-    if any(p.exists() for p in sponsor_paths):
-        _html('<div style="text-align:center; margin-top: 1.5rem; margin-bottom: 1rem;"><span class="eyebrow">OUR SPONSORS</span></div>')
-        cols = st.columns(5)
-        for i, col in enumerate(cols):
-            if sponsor_paths[i].exists():
-                col.image(str(sponsor_paths[i]), use_container_width=True)
+    valid_paths = [p for p in sponsor_paths if p.exists()]
+    
+    if not valid_paths:
+        return
+        
+    _html('<div style="text-align:center; margin-top: 1.5rem; margin-bottom: 1rem;"><span class="eyebrow">OUR SPONSORS</span></div>')
+    
+    img_tags = []
+    for path in valid_paths:
+        try:
+            with open(path, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("utf-8")
+            img_tags.append(
+                f'<img src="data:image/png;base64,{encoded}" '
+                f'style="flex: 1; max-width: 18%; object-fit: contain; border-radius: 8px;">'
+            )
+        except OSError:
+            continue
+            
+    if img_tags:
+        _html(f'<div style="display: flex; flex-wrap: nowrap; justify-content: center; align-items: center; gap: 2%; width: 100%;">'
+              f'{"".join(img_tags)}</div>')
 
 
 def hero() -> None:
