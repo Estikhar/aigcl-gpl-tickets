@@ -15,9 +15,9 @@
    A hardware QR scanner types the ticket payload and presses Enter. The form
    is clear_on_submit so scanning is continuous — no mouse, no tapping.
    Three and only three verdicts:
-        INVALID        payload fails the HMAC, or the pass was never issued
-        DUPLICATE      checkin_time already stamped — someone used this pass
-        AUTHENTICATED checkin_time written, guest walks in
+       INVALID        payload fails the HMAC, or the pass was never issued
+       DUPLICATE      checkin_time already stamped — someone used this pass
+       AUTHENTICATED checkin_time written, guest walks in
 
  SECURITY MODEL — read this before deploying
    The QR carries  VALIDATE|Pass-42|<10-hex>  where the hex is a truncated
@@ -47,21 +47,26 @@
  Run:   streamlit run app.py
 
  .streamlit/secrets.toml
-      [connections.gsheets]
-      spreadsheet = "https://docs.google.com/spreadsheets/d/..."
-      type = "service_account"
-      ...service account keys...
+     [connections.gsheets]
+     spreadsheet = "https://docs.google.com/spreadsheets/d/..."
+     type = "service_account"
+     ...service account keys...
 
-      [app]
-      admin_password = "..."
-      security_salt  = "long-random-string-keep-private"
-      event_time     = "6:00 PM"
-      maps_url       = "https://maps.app.goo.gl/..."
+     [app]
+     admin_password = "..."
+     security_salt  = "long-random-string-keep-private"
+     event_time     = "6:00 PM"
+     maps_url       = "https://maps.app.goo.gl/..."
 
  Assets next to app.py:
-      header.png             edge-bleed artwork on the ticket + web hero
-      footer.png             web page footer
-      assets/*.ttf           OPTIONAL. Fetched once on first run if absent.
+     header.png            edge-bleed artwork on the ticket + web hero
+     footer.png            web page footer
+     sponcer 1.png         sponsor logo 1 (rendered at bottom)
+     sponcer 2.png         sponsor logo 2
+     sponcer 3.png         sponsor logo 3
+     sponcer 4.png         sponsor logo 4
+     sponcer 5.png         sponsor logo 5
+     assets/*.ttf          OPTIONAL. Fetched once on first run if absent.
 ================================================================================
 """
 
@@ -149,6 +154,9 @@ SPLASH_FADE: Final[float] = 0.65
 REVEAL_BASE: Final[float] = 0.72
 
 # --- Palette -----------------------------------------------------------------
+# Championship gold for structure, pitch emerald and Alobha royal blue as
+# ambient light only. The metals are identical in CSS and in Pillow so the web
+# portal and the printed pass are the same object.
 GOLD_STOPS: Final[tuple[str, ...]] = (
     "#BF953F", "#FCF6BA", "#B38728", "#FBF5B7", "#AA771C",
 )
@@ -183,10 +191,12 @@ JPEG_QUALITY: Final[int] = 94
 
 
 def seat_number(seat_id: str) -> str:
+    """'Pass-127' -> '127'. The stub hero is the numeral alone."""
     return str(seat_id).split("-")[-1].strip() or str(seat_id)
 
 
 def normalise_seat(raw: str) -> str | None:
+    """Accept 'Pass-12', 'pass 12', 'PASS_12', '12' -> 'Pass-12'. Else None."""
     match = SEAT_RE.match(str(raw))
     if not match:
         return None
@@ -199,6 +209,15 @@ def normalise_seat(raw: str) -> str | None:
 # =============================================================================
 # 2. FONT SYSTEM
 # =============================================================================
+# Pillow's built-in default is a bitmap face that looks like a receipt printer,
+# so a real TTF is non-negotiable. Two further traps:
+#   * The Rupee sign (U+20B9) is NOT in every TTF. DejaVu has it, Liberation
+#     does not (verified by rendering). A silent font swap turns a price badge
+#     into a tofu box, so the resolved face is probed at runtime.
+#   * Google's OFL faces ship as VARIABLE fonts. FreeType loads the default
+#     instance, which is Regular — asking for "Bold" and silently getting
+#     Regular is why programmatic tickets look limp. set_variation_by_name()
+#     pulls the real weight.
 
 FONT_SOURCES: Final[dict[str, str]] = {
     "Inter.ttf":
@@ -227,6 +246,11 @@ SYSTEM_SERIF: Final[tuple[str, ...]] = (
 
 
 def _fetch_font(name: str) -> Path | None:
+    """
+    One-time download into assets/. Wrapped tight: a 12s timeout, any failure
+    is swallowed, and the app falls through to system fonts. A ticketing portal
+    must never fail to issue a pass because a CDN was slow.
+    """
     target = ASSET_DIR / name
     if target.exists():
         return target
@@ -236,19 +260,20 @@ def _fetch_font(name: str) -> Path | None:
         ASSET_DIR.mkdir(parents=True, exist_ok=True)
         with urllib.request.urlopen(FONT_SOURCES[name], timeout=12) as response:
             payload = response.read()
-        if len(payload) < 20_000:
+        if len(payload) < 20_000:          # obviously not a font
             return None
         tmp = target.with_suffix(".part")
         tmp.write_bytes(payload)
-        ImageFont.truetype(str(tmp), 24)
+        ImageFont.truetype(str(tmp), 24)   # prove it parses before publishing
         tmp.replace(target)
         return target
-    except Exception:
+    except Exception:                       # noqa: BLE001 — never fatal
         return None
 
 
 @lru_cache(maxsize=8)
 def _face(role: str) -> tuple[str | None, str | None]:
+    """Return (path, forced_variation_name) for a type role."""
     if role == "serif":
         local = _fetch_font("PlayfairDisplay.ttf")
         if local:
@@ -256,7 +281,7 @@ def _face(role: str) -> tuple[str | None, str | None]:
         for candidate in SYSTEM_SERIF:
             if Path(candidate).exists():
                 return candidate, None
-        role = "sans"
+        role = "sans"                        # no serif anywhere — fall through
     local = _fetch_font("Inter.ttf")
     if local:
         return str(local), None
@@ -266,10 +291,11 @@ def _face(role: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+# role -> (face, variable-axis weight)
 ROLES: Final[dict[str, tuple[str, str | None]]] = {
     "title":    ("serif", "Black"),
     "subtitle": ("serif", "Medium"),
-    "hero":     ("sans", "Black"),
+    "hero":     ("sans", "Black"),      # the pass numeral
     "strong":   ("sans", "Bold"),
     "label":    ("sans", "Medium"),
 }
@@ -289,13 +315,18 @@ def font(role: str, size: int) -> Any:
     if weight:
         try:
             fnt.set_variation_by_name(weight)
-        except Exception:
+        except Exception:                    # noqa: BLE001 — static face, fine
             pass
     return fnt
 
 
 @lru_cache(maxsize=16)
 def font_has_glyph(role: str, char: str) -> bool:
+    """
+    Render the character beside a guaranteed-unmapped codepoint. Identical
+    bitmaps mean the font is drawing .notdef — a tofu box — so the glyph is
+    missing and we must substitute.
+    """
     probe = font(role, 48)
 
     def stamp(text: str) -> bytes:
@@ -327,6 +358,7 @@ def ellipsis() -> str:
 
 
 def money_text(value: Any) -> str:
+    """A stray secrets value must never crash ticket generation."""
     try:
         return f"{float(str(value).replace(',', '').strip()):,.0f}"
     except (TypeError, ValueError):
@@ -338,6 +370,7 @@ def value_is_numeric() -> bool:
 
 
 def value_label() -> str:
+    """`ticket_value` may be a number OR a phrase like 'By Invitation Only'."""
     if value_is_numeric():
         return f"{rupee()}{money_text(TICKET_VALUE)} VALUE"
     return str(TICKET_VALUE).strip().upper()
@@ -351,6 +384,17 @@ def clock_ist() -> str:
     return datetime.now(IST).strftime("%H:%M:%S")
 
 
+# --- OpenType figures -------------------------------------------------------
+# Playfair Display defaults to OLD-STYLE figures: the 2 and the 0 drop below
+# cap height, so "T20" renders as "T2o" and "2026" looks like a footnote. On a
+# T20 league pass that is not a stylistic quibble, it is a misprint. `lnum`
+# forces lining figures; `tnum` makes them tabular, which is what you want for
+# phone numbers and dates anyway. Inter is already lining, so both are no-ops
+# there and can be applied globally.
+#
+# Applying features needs libraqm. Pillow's manylinux wheels bundle it, but a
+# source build may not, and passing `features=` without it raises. Probe once,
+# then every text call degrades silently to plain layout.
 OT_FEATURES: Final[list[str]] = ["lnum", "tnum"]
 
 
@@ -361,9 +405,9 @@ def _raqm_available() -> bool:
             return False
         probe = Image.new("L", (8, 8), 0)
         ImageDraw.Draw(probe).text((0, 0), "0", font=font("label", 8), fill=255,
-                                  features=OT_FEATURES)
+                                   features=OT_FEATURES)
         return True
-    except Exception:
+    except Exception:                        # noqa: BLE001 — no Raqm, no features
         return False
 
 
@@ -373,22 +417,24 @@ def features_ok() -> bool:
 
 
 def ot_len(draw: ImageDraw.ImageDraw, text: str, fnt: Any) -> float:
+    """Measure with the SAME features used to draw, or fit_text mis-measures."""
     if features_ok():
         try:
             return draw.textlength(text, font=fnt, features=OT_FEATURES)
-        except Exception:
+        except Exception:                    # noqa: BLE001
             pass
     return draw.textlength(text, font=fnt)
 
 
 def ot_text(draw: ImageDraw.ImageDraw, xy: tuple[float, float], text: str,
             fnt: Any, fill: Any, anchor: str = "la") -> None:
+    """`fill` is an RGB tuple on the canvas and a plain int on an L mask."""
     if features_ok():
         try:
             draw.text(xy, text, font=fnt, fill=fill, anchor=anchor,
                       features=OT_FEATURES)
             return
-        except Exception:
+        except Exception:                    # noqa: BLE001
             pass
     draw.text(xy, text, font=fnt, fill=fill, anchor=anchor)
 
@@ -401,6 +447,10 @@ def draw_tracked(
     draw: ImageDraw.ImageDraw, xy: tuple[float, float], text: str, fnt: Any,
     fill: tuple[int, int, int], tracking: float = 0, anchor: str = "la",
 ) -> None:
+    """
+    Pillow has no letter-spacing. Wide tracking on small uppercase labels is the
+    single strongest "premium print" signal, so glyphs are advanced by hand.
+    """
     x, y = xy
     if tracking <= 0:
         ot_text(draw, (x, y), text, fnt, fill, anchor=anchor)
@@ -426,6 +476,11 @@ def fit_font(draw: ImageDraw.ImageDraw, text: str, role: str, max_w: float,
 
 def fit_text(draw: ImageDraw.ImageDraw, text: str, role: str, max_w: float,
              start: int, minimum: int) -> tuple[Any, str]:
+    """
+    Shrink to fit, then TRUNCATE if it still overflows at the size floor.
+    Shrinking alone bottoms out and lets a 60-character organisation name run
+    through the next column and into the stub.
+    """
     fnt = fit_font(draw, text, role, max_w, start, minimum)
     if ot_len(draw, text, fnt) <= max_w:
         return fnt, text
@@ -437,6 +492,7 @@ def fit_text(draw: ImageDraw.ImageDraw, text: str, role: str, max_w: float,
 
 def fit_tracked(draw: ImageDraw.ImageDraw, text: str, role: str, max_w: float,
                 start: int, minimum: int, tracking: float) -> tuple[Any, str]:
+    """fit_text, but accounting for hand-applied tracking in the width budget."""
     size = start
     while size > minimum and text_w(draw, text, font(role, size), tracking) > max_w:
         size -= 1
@@ -451,6 +507,7 @@ def fit_tracked(draw: ImageDraw.ImageDraw, text: str, role: str, max_w: float,
 
 @lru_cache(maxsize=4)
 def gold_ramp(size: tuple[int, int]) -> Image.Image:
+    """The five-stop metal, as a vertical ramp. Flat gold reads like clip art."""
     w, h = size
     ramp = Image.new("RGB", (1, max(h, 2)))
     px = ramp.load()
@@ -477,6 +534,11 @@ def draw_embossed(
     canvas: Image.Image, xy: tuple[float, float], text: str, fnt: Any,
     anchor: str = "la", tracking: float = 0, glow: int = 0, emboss: int = 0,
 ) -> None:
+    """
+    Foil-stamp in three passes: dark shadow down-right, metallic ramp, pale
+    highlight up-left. Separate masks rather than ImageChops.offset, which wraps
+    at the canvas edge and would smear a glyph onto the opposite side.
+    """
     size = canvas.size
     x, y = xy
     mask = _text_mask(size, (x, y), text, fnt, tracking, anchor)
@@ -497,6 +559,11 @@ def draw_embossed(
 
 
 def vertical_mask(size: tuple[int, int], stops: list[tuple[float, float]]) -> Image.Image:
+    """
+    L mask from (position 0..1, alpha 0..1) stops. This is what keeps the header
+    artwork OFF the text: alpha drops to exactly zero across the detail block,
+    so contrast there is guaranteed rather than hoped for.
+    """
     w, h = size
     strip = Image.new("L", (1, max(h, 2)), 0)
     px = strip.load()
@@ -530,6 +597,7 @@ def radial_glow(size: tuple[int, int], centre: tuple[float, float],
 
 
 def cover_fit(img: Image.Image, size: tuple[int, int]) -> Image.Image:
+    """Scale-and-crop to fill, preserving aspect ratio (never squashed)."""
     tw, th = size
     sw, sh = img.size
     scale = max(tw / sw, th / sh)
@@ -541,6 +609,11 @@ def cover_fit(img: Image.Image, size: tuple[int, int]) -> Image.Image:
 
 @st.cache_data(show_spinner=False)
 def load_flat_rgb(path_str: str, _mtime: float) -> bytes | None:
+    """
+    Flatten any PNG onto the ticket ground as RGB. JPEG has no alpha, and a
+    palette PNG carrying transparency composites unpredictably — flattening once
+    up front kills a whole class of "why is my banner a black rectangle" bugs.
+    """
     try:
         with Image.open(path_str) as src:
             src.load()
@@ -562,11 +635,16 @@ def header_art() -> Image.Image | None:
 
 
 # =============================================================================
-# 4. GATE SECURITY
+# 4. GATE SECURITY  (HMAC payload + abstract security print)
 # =============================================================================
 
 
 def security_hash(seat_id: str) -> str:
+    """
+    Truncated HMAC-SHA256 over "EVENT|seat", keyed with the private salt.
+    HMAC rather than a bare sha256(salt + msg) — correct construction, same
+    cost, and it keeps the key handling honest.
+    """
     return hmac.new(
         SECURITY_SALT.encode("utf-8"),
         f"{EVENT_NAME}|{seat_id}".encode("utf-8"),
@@ -575,10 +653,12 @@ def security_hash(seat_id: str) -> str:
 
 
 def gate_payload(seat_id: str) -> str:
+    """Deliberately short — a sparse QR is a QR that scans on the first try."""
     return f"VALIDATE|{seat_id}|{security_hash(seat_id)}"
 
 
 def verify_payload(raw: str) -> str | None:
+    """Full payload -> canonical seat_id, or None if the signature is wrong."""
     match = SCAN_RE.match(str(raw))
     if not match:
         return None
@@ -591,6 +671,16 @@ def verify_payload(raw: str) -> str | None:
 
 
 def qr_image(payload: str, edge_px: int) -> Image.Image:
+    """
+    ERROR_CORRECT_L keeps the grid sparse — higher levels add redundancy
+    modules, shrinking each module at a fixed print size, the opposite of what
+    a hand-held scan needs. NEAREST resize keeps module edges razor sharp;
+    LANCZOS would blur them into grey mush.
+    """
+    # border=4 is the spec minimum quiet zone. It was 3, which decodes fine on
+    # a flat scan but leaves nothing to spare when an operator fills the
+    # viewfinder edge-to-edge and the camera clips the white margin — the
+    # decoder then cannot locate the finder patterns at all.
     qr = qrcode.QRCode(version=None, box_size=10, border=4,
                        error_correction=qrcode.constants.ERROR_CORRECT_L)
     qr.add_data(payload)
@@ -609,12 +699,23 @@ def qr_px_per_module(payload: str, edge_px: int = round(QR_PX * OUT_SCALE)) -> f
 
 
 def ticket_digest(row: pd.Series) -> str:
+    """Stable per pass — the bars MUST look identical every regeneration."""
     seed = f"{EVENT_NAME}|{row['seat_id']}|{row['phone']}|{row['booked_at']}"
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
 def draw_security_bars(draw: ImageDraw.ImageDraw, x: float, y: float,
                        w: float, h: float, digest: str, s: int) -> None:
+    """
+    Abstract security-print bars — the visual language premiere passes use to
+    signal "official document".
+
+    NOT machine-readable, by design and by honesty: it encodes nothing and no
+    scanner will read it. It IS deterministic (hashed from seat + phone + time)
+    so the same pass always renders identically; a random pattern would change
+    on every regeneration, which is exactly what a forgery looks like.
+    Everything the gate actually reads lives in the QR.
+    """
     raw = bytes.fromhex(digest)
     cx, i = x, 0
     while cx < x + w and i < 512:
@@ -636,6 +737,13 @@ def draw_security_bars(draw: ImageDraw.ImageDraw, x: float, y: float,
 
 
 def _draw_background(canvas: Image.Image, s: int) -> None:
+    """
+    Pitch black ground lit from four corners: championship gold top-left,
+    Alobha royal blue top-right, pitch emerald along the bottom. Header artwork
+    bleeds in at the TOP and BOTTOM edges only and is masked to zero across the
+    middle band, so guest details always sit on pure black. A full-canvas
+    watermark is precisely what makes the type look muddy.
+    """
     w, h = canvas.size
     art = header_art()
     if art is not None:
@@ -669,9 +777,10 @@ def _draw_background(canvas: Image.Image, s: int) -> None:
 
 def _draw_gold_rule(canvas: Image.Image, box: tuple[float, float, float, float],
                     radius: int, width: int) -> None:
+    """A rounded rect stroked with the real metal ramp, not a flat colour."""
     mask = Image.new("L", canvas.size, 0)
     ImageDraw.Draw(mask).rounded_rectangle(box, radius=radius,
-                                          outline=255, width=width)
+                                           outline=255, width=width)
     canvas.paste(gold_ramp(canvas.size), (0, 0), mask)
 
 
@@ -695,6 +804,12 @@ def _draw_frame(canvas: Image.Image, w: int, h: int, s: int) -> None:
 
 def _draw_seam(draw: ImageDraw.ImageDraw, x0: float, x1: float, y: float,
                s: int) -> None:
+    """
+    The signature detail: the divider under the marquee is a cricket-ball seam.
+    A dim gold hairline the full width, with six angled stitches worked over the
+    centre. It is the only literal cricket reference on the pass — everything
+    else stays black-tie, which is what keeps it from reading as merchandise.
+    """
     draw.line([x0, y, x1, y], fill=(118, 96, 26), width=max(1, s))
     mid = (x0 + x1) / 2
     span, step, rise = 96 * s, 19 * s, 6 * s
@@ -717,6 +832,7 @@ def build_ticket_jpeg(row: pd.Series) -> bytes:
     digest = ticket_digest(row)
     seat_id = str(row["seat_id"])
 
+    # ------------------------------------------------ perforation / tear line
     dash, gap = 13 * s, 11 * s
     y = 44 * s
     while y < h - 44 * s:
@@ -728,6 +844,7 @@ def build_ticket_jpeg(row: pd.Series) -> bytes:
         draw.ellipse([stub_x - r, cy - r, stub_x + r, cy + r],
                      fill=RGB_INK, outline=RGB_GOLD, width=max(1, 2 * s))
 
+    # ---------------------------------------------------- LEFT: the marquee
     lx = 62 * s
     right_edge = stub_x - 52 * s
     avail = right_edge - lx
@@ -774,6 +891,7 @@ def build_ticket_jpeg(row: pd.Series) -> bytes:
     field(col2, 380 * s, "ISSUED ON",
           str(row["booked_at"] or now_ist()).split(" ")[0], col_w)
 
+    # ---------------------------------------------------- admission badge
     badge = f"COMPLIMENTARY ADMISSION  ·  {value_label()}"
     bf = font("strong", 18 * s)
     bw = text_w(draw, badge, bf, 3.0 * s) + 52 * s
@@ -788,6 +906,7 @@ def build_ticket_jpeg(row: pd.Series) -> bytes:
         draw_tracked(draw, (lx + bw + 30 * s, by + bh / 2), serial,
                      font("label", 13 * s), RGB_MUTED, tracking=3.0 * s, anchor="lm")
 
+    # ---------------------------------------------------- RIGHT: the stub
     sx = stub_x + (w - 15 * s - stub_x) / 2
     stub_w = w - 15 * s - stub_x
 
@@ -819,9 +938,12 @@ def build_ticket_jpeg(row: pd.Series) -> bytes:
                  font("label", 11 * s), (120, 126, 136), tracking=2.2 * s,
                  anchor="ma")
 
+    # ---------------------------------------------------- render out
     out_w, out_h = round(TICKET_W * OUT_SCALE), round(TICKET_H * OUT_SCALE)
     final = canvas.resize((out_w, out_h), Image.LANCZOS)
 
+    # QR goes on AFTER the downsample at its exact output size. Resampling a QR
+    # is what turns crisp modules into grey mush.
     qr_out = round(QR_PX * OUT_SCALE)
     qr = qr_image(gate_payload(seat_id), qr_out)
     cx = sx / s * OUT_SCALE
@@ -829,6 +951,8 @@ def build_ticket_jpeg(row: pd.Series) -> bytes:
     final.paste(qr, (round(cx - qr_out / 2), round(cy - qr_out / 2)))
 
     buf = io.BytesIO()
+    # subsampling=0 (4:4:4). JPEG's default 4:2:0 chroma subsampling visibly
+    # smears fine gold type and QR edges against a dark ground.
     final.save(buf, "JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=True)
     return buf.getvalue()
 
@@ -851,6 +975,7 @@ def get_conn() -> GSheetsConnection:
 
 
 def _normalise(df: pd.DataFrame) -> pd.DataFrame:
+    """Sheets round-trips are lossy: blanks -> NaN, phones -> '9876543210.0'."""
     df = df.reindex(columns=SCHEMA)
     df = df.astype(object).where(pd.notna(df), "")
     for col in SCHEMA:
@@ -883,6 +1008,11 @@ def blank_layout() -> pd.DataFrame:
 # =============================================================================
 # 7. ALLOCATION ENGINE
 # =============================================================================
+# Sheets has no transactions, and blind allocation is worse than a seat grid:
+# every concurrent user computes the SAME next pass.
+#   read(ttl=0) -> write -> read back and confirm OUR phone holds the pass ->
+#   retry the next pass if someone beat us.
+# Compare-and-verify, not compare-and-swap. Shrinks the window; cannot close it.
 
 
 def next_free_seat(df: pd.DataFrame) -> str | None:
@@ -935,6 +1065,8 @@ def allocate_seat(name: str, organisation: str, phone: str
 # =============================================================================
 # 8. GATE AUTHENTICATION ENGINE
 # =============================================================================
+# Verdicts are deliberately few and blunt. A gate operator glancing at a phone
+# in the dark needs colour + icon, not prose.
 
 GRANTED: Final[str] = "GRANTED"
 DUPLICATE: Final[str] = "DUPLICATE"
@@ -944,11 +1076,17 @@ FAILED: Final[str] = "FAILED"
 
 
 def resolve_scan(raw: str, allow_manual: bool) -> tuple[str | None, str]:
+    """
+    Returns (seat_id, mode). mode is 'qr', 'manual' or 'bad'.
+    A signed payload always wins. A bare number is only honoured when the
+    operator has explicitly switched manual entry on — otherwise anybody who
+    can guess "Pass-7" walks in.
+    """
     seat = verify_payload(raw)
     if seat:
         return seat, "qr"
     if str(raw).strip().upper().startswith("VALIDATE"):
-        return None, "bad"
+        return None, "bad"                    # looked like a pass, failed HMAC
     if allow_manual:
         manual = normalise_seat(raw)
         if manual:
@@ -957,9 +1095,13 @@ def resolve_scan(raw: str, allow_manual: bool) -> tuple[str | None, str]:
 
 
 def mark_checkin(seat_id: str) -> tuple[str, dict[str, Any]]:
+    """
+    Stamp checkin_time, or explain why not. Read fresh -> branch -> write ->
+    read back and confirm. One Sheets round-trip pair per scan; budget 2-4s.
+    """
     try:
         df = load_seats(fresh=True)
-    except Exception as exc:
+    except Exception as exc:                   # noqa: BLE001 — surface at the gate
         return FAILED, {"seat_id": seat_id, "note": f"Sheet unreachable: {exc}"}
 
     hit = df[df["seat_id"] == seat_id]
@@ -994,7 +1136,7 @@ def mark_checkin(seat_id: str) -> tuple[str, dict[str, Any]]:
         if back.empty or not str(back.iloc[0]["checkin_time"]).strip():
             info["note"] = "Write did not stick. Scan again."
             return FAILED, info
-    except Exception as exc:
+    except Exception as exc:                   # noqa: BLE001
         info["note"] = f"Could not write check-in: {exc}"
         return FAILED, info
 
@@ -1003,6 +1145,7 @@ def mark_checkin(seat_id: str) -> tuple[str, dict[str, Any]]:
 
 
 def undo_checkin(seat_id: str) -> tuple[bool, str]:
+    """Mis-scans happen. Without this, a wrongly-scanned guest is locked out."""
     try:
         df = load_seats(fresh=True)
         hit = df[df["seat_id"] == seat_id]
@@ -1011,7 +1154,7 @@ def undo_checkin(seat_id: str) -> tuple[bool, str]:
         df.loc[hit.index[0], "checkin_time"] = ""
         save_seats(df)
         return True, f"Check-in cleared for {seat_id}. The guest can scan again."
-    except Exception as exc:
+    except Exception as exc:                   # noqa: BLE001
         return False, f"Could not clear check-in: {exc}"
 
 
@@ -1021,16 +1164,40 @@ def undo_checkin(seat_id: str) -> tuple[bool, str]:
 
 
 def _html(markup: str) -> None:
+    """
+    The ONLY sanctioned injection path.
+
+    Not st.html(): it sanitizes its input and, depending on the Streamlit build,
+    drops a <style> block entirely. Nothing errors — the page just renders with
+    stock styling, and the #FF4B4B primary button is the tell.
+
+    Three markdown traps this also defuses:
+      * a line indented 4+ spaces becomes a CODE BLOCK, printing the stylesheet
+        onto the page as literal text;
+      * a blank line inside HTML becomes a paragraph break, injecting <p> tags
+        into the middle of the markup;
+      * a line starting '#' or '-' can parse as a heading or list item.
+    Joining with SPACES into one physical line makes all three impossible.
+    """
     cleaned = " ".join(line.strip() for line in markup.splitlines() if line.strip())
     st.markdown(cleaned, unsafe_allow_html=True)
 
 
 def esc(text: Any) -> str:
+    """Guest-supplied strings land inside injected HTML. Neutralise them."""
     return (str(text).replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
 def inject_theme(intro: bool = False) -> None:
+    """
+    `intro=True` only on the FIRST script run of a session.
+
+    Streamlit re-executes the whole script on every interaction, so
+    unconditional entrance CSS would replay the blackout and the slide-up on
+    every keystroke rerun and every form submit. The app would feel broken —
+    and at the gate it would blackout the screen on every single scan.
+    """
     hold, fade = SPLASH_HOLD, SPLASH_FADE
 
     if intro:
@@ -1052,6 +1219,9 @@ def inject_theme(intro: bool = False) -> None:
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;800;900&family=Playfair+Display:wght@500;700;900&display=swap');
 
+    /* ============ GROUND ============ */
+    /* Gold from the top-left, Alobha royal blue from the top-right, pitch
+       emerald rising from the floor. Three lights, one black room. */
     .stApp, [data-testid="stAppViewContainer"], section.main,
     [data-testid="stMain"] {{ background-color:{OBSIDIAN} !important; }}
     .stApp {{
@@ -1067,6 +1237,10 @@ def inject_theme(intro: bool = False) -> None:
     html, body, [class*="css"] {{ font-family:Inter, system-ui, sans-serif; }}
     ::selection {{ background:rgba(212,175,55,.32); }}
 
+    /* ============ GLASS CARDS ============ */
+    /* The metal edge is a masked ::before ring, not a border-image. A gradient
+       painted via background-clip:border-box bleeds through a translucent
+       fill and tints the whole card gold. */
     .glass {{
         position:relative;
         background:rgba(255,255,255,0.03);
@@ -1081,7 +1255,7 @@ def inject_theme(intro: bool = False) -> None:
         padding:1px; background:{GOLD_CSS}; opacity:.55;
         -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
         -webkit-mask-composite:xor; mask:linear-gradient(#000 0 0) content-box,
-                                     linear-gradient(#000 0 0);
+                                          linear-gradient(#000 0 0);
         mask-composite:exclude; pointer-events:none;
     }}
     .glass--hero::before {{ opacity:.9; animation:vipBreathe 5.6s ease-in-out infinite; }}
@@ -1089,6 +1263,7 @@ def inject_theme(intro: bool = False) -> None:
                     inset 0 1px 0 rgba(255,255,255,.07),
                     0 0 46px rgba(212,175,55,.10); }}
 
+    /* ============ TYPE ============ */
     .pill {{
         display:inline-block; padding:.46rem 1.2rem; border-radius:999px;
         font-size:.63rem; font-weight:900; letter-spacing:.3em; color:#12141A;
@@ -1096,7 +1271,7 @@ def inject_theme(intro: bool = False) -> None:
         animation:pillsheen 6s ease-in-out infinite, pillglow 3.2s ease-in-out infinite;
     }}
     @keyframes pillsheen {{ 0%,100%{{background-position:0% 50%}}
-                          50%{{background-position:100% 50%}} }}
+                            50%{{background-position:100% 50%}} }}
     @keyframes pillglow {{
         0%,100%{{box-shadow:0 0 14px rgba(212,175,55,.38),0 0 32px rgba(212,175,55,.14)}}
         50%    {{box-shadow:0 0 28px rgba(212,175,55,.70),0 0 62px rgba(212,175,55,.28)}}
@@ -1120,6 +1295,7 @@ def inject_theme(intro: bool = False) -> None:
     .eyebrow {{ font-size:.58rem; font-weight:800; letter-spacing:.32em;
                 text-transform:uppercase; color:rgba(236,231,218,.4); }}
 
+    /* ============ META CHIPS ============ */
     .chips {{ display:flex; flex-wrap:wrap; gap:.5rem; margin-top:1.1rem; }}
     .chip {{
         display:inline-flex; align-items:baseline; gap:.55rem;
@@ -1138,6 +1314,7 @@ def inject_theme(intro: bool = False) -> None:
     a.chip, a.chip:link, a.chip:visited, a.chip:hover {{
         text-decoration:none !important; color:#EFE8D8 !important; }}
 
+    /* ============ ADMISSION ============ */
     .price {{ display:flex; flex-wrap:wrap; gap:2.2rem; align-items:flex-end; }}
     .price-old {{ font-size:1.4rem; font-weight:700; color:{GOLD_SOFT};
                   text-decoration:line-through; opacity:.6;
@@ -1150,6 +1327,7 @@ def inject_theme(intro: bool = False) -> None:
     .price-word {{ font-size:1.5rem; font-weight:900; color:{GOLD_SOFT};
                    letter-spacing:.04em; line-height:1.1; }}
 
+    /* ============ TRACKER ============ */
     .trk-rail {{ height:10px; border-radius:999px; overflow:hidden;
                  background:rgba(255,255,255,.05);
                  border:1px solid rgba(212,175,55,.16); }}
@@ -1160,6 +1338,9 @@ def inject_theme(intro: bool = False) -> None:
     .num {{ color:{GOLD_SOFT}; font-weight:900;
             font-variant-numeric:tabular-nums; }}
 
+    /* ============ GATE VERDICT ============ */
+    /* The one screen that has to read across a dark lobby in half a second.
+       Colour first, icon second, words third. */
     .verdict {{ position:relative; border-radius:26px; text-align:center;
                 padding:2.1rem 1.3rem 1.8rem; margin:.2rem 0 1rem;
                 overflow:hidden; }}
@@ -1193,7 +1374,7 @@ def inject_theme(intro: bool = False) -> None:
         animation:badShake .42s cubic-bezier(.36,.07,.19,.97) both; }}
     .verdict--bad .verdict__title {{ color:{ALERT}; }}
     @keyframes okFlash {{ from {{ transform:scale(.965); opacity:0; }}
-                        to {{ transform:none; opacity:1; }} }}
+                          to {{ transform:none; opacity:1; }} }}
     @keyframes dupePulse {{ 0%,100%{{ box-shadow:0 0 34px rgba(255,176,32,.18) }}
                             50%{{ box-shadow:0 0 78px rgba(255,176,32,.52) }} }}
     @keyframes badShake {{ 10%,90%{{transform:translateX(-3px)}}
@@ -1203,11 +1384,15 @@ def inject_theme(intro: bool = False) -> None:
     .scanlog {{ font-family:Inter, system-ui, sans-serif; font-size:.76rem;
                 letter-spacing:.04em; line-height:2.05; }}
     .scanlog span.t {{ color:rgba(236,231,218,.4);
-                        font-variant-numeric:tabular-nums; }}
+                       font-variant-numeric:tabular-nums; }}
     .scanlog b.ok {{ color:{EMERALD}; }}
     .scanlog b.dupe {{ color:{AMBER}; }}
     .scanlog b.bad {{ color:{ALERT}; }}
 
+    /* ============ INPUTS ============ */
+    /* BaseWeb wraps the <input> in its own bordered container, so the CONTAINER
+       must lose its border — styling the <input> alone leaves the grey box
+       visible underneath. Every DOM generation is covered. */
     .stTextInput label, .stTextInput label p,
     .stTextInput label div, .stTextInput label span {{
         font-size:0.92rem !important; font-weight:800 !important;
@@ -1254,21 +1439,32 @@ def inject_theme(intro: bool = False) -> None:
         border:none !important; outline:none !important; box-shadow:none !important;
         color:#FFFFFF !important; caret-color:{GOLD} !important;
         -webkit-text-fill-color:#FFFFFF !important; }}
+    /* At 1.4rem a faint placeholder reads as a rendering fault, so it is lifted
+       to stay clearly legible without competing with real input. */
     .stTextInput input::placeholder {{
         color:rgba(245,240,228,.46) !important; font-weight:400 !important;
         font-size:1.02rem !important; letter-spacing:.04em !important;
         -webkit-text-fill-color:rgba(245,240,228,.46) !important; }}
     .stTextInput [data-baseweb="input"] > div {{ background:transparent !important; }}
 
+    /* ============ CAMERA RELAY ============ */
+    /* The camera's landing pad. Pulled off-screen rather than display:none —
+       a clipped element still accepts programmatic input events and clicks,
+       and Streamlit still commits the form. display:none is riskier: some
+       builds skip layout for it and the click never registers. No
+       pointer-events:none either; .click() ignores it, but why risk it. */
     .st-key-{RELAY_KEY} {{
         position:absolute !important; left:-10000px !important; top:0 !important;
         width:1px !important; height:1px !important;
         overflow:hidden !important; opacity:0 !important; }}
 
+    /* The viewfinder iframe sits flush; its own gold frame lives inside. */
     .stElementContainer:has(> iframe[title="st.iframe"]) {{ line-height:0; }}
     iframe[title="st.iframe"] {{ border:none !important; background:transparent !important;
         color-scheme:normal; }}
 
+    /* The scanner field is emerald, not gold — the operator must never confuse
+       the gate input with a guest form. */
     .st-key-gate_field .stTextInput > div > div,
     .st-key-gate_field [data-baseweb="input"],
     .st-key-gate_field [data-testid="stTextInputRootElement"] {{
@@ -1277,6 +1473,11 @@ def inject_theme(intro: bool = False) -> None:
     .st-key-gate_field input {{ font-family:'Inter', monospace !important;
         letter-spacing:.08em !important; }}
 
+    /* ============ BUTTONS ============ */
+    /* Streamlit renames its button hooks between releases and its default
+       primary is #FF4B4B, so every generation of selector is covered and
+       background-color is nuked explicitly — the `background` shorthand alone
+       loses to a later background-color rule in some builds. */
     .stButton > button, .stButton button,
     .stFormSubmitButton > button, .stFormSubmitButton button,
     .stDownloadButton > button, .stDownloadButton button,
@@ -1302,7 +1503,7 @@ def inject_theme(intro: bool = False) -> None:
         background-image:{GOLD_CSS} !important; background-size:200% 200%;
         position:relative; overflow:hidden;
         animation:ctapulse 2.6s ease-in-out infinite,
-                   ctashift 7s ease-in-out infinite; }}
+                  ctashift 7s ease-in-out infinite; }}
     .stFormSubmitButton button * {{ color:#12100C !important;
         font-weight:900 !important; letter-spacing:.22em !important; }}
     @keyframes ctashift {{ 0%,100%{{background-position:0% 50%}}
@@ -1324,6 +1525,8 @@ def inject_theme(intro: bool = False) -> None:
         box-shadow:0 26px 62px -10px rgba(212,175,55,.95) !important; }}
     .stFormSubmitButton button:active {{ transform:translateY(0); }}
 
+    /* The gate submit is a quiet emerald bar. It is pressed by a barcode gun,
+       not a person, so it must not throb for gold attention all evening. */
     .st-key-gate_form .stFormSubmitButton button {{
         min-height:62px !important; font-size:.86rem !important;
         letter-spacing:.26em !important; border-radius:16px !important;
@@ -1343,7 +1546,7 @@ def inject_theme(intro: bool = False) -> None:
         border:1px solid rgba(212,175,55,.5) !important; color:#F7F0DE !important;
         background-color:rgba(212,175,55,.12) !important;
         background-image:linear-gradient(135deg, rgba(212,175,55,.2),
-                                               rgba(212,175,55,.04)) !important; }}
+                                         rgba(212,175,55,.04)) !important; }}
     .stDownloadButton button:hover {{ background-image:{GOLD_CSS} !important;
         color:#12100C !important; border-color:transparent !important;
         box-shadow:0 20px 50px -12px rgba(212,175,55,.85) !important; }}
@@ -1356,6 +1559,7 @@ def inject_theme(intro: bool = False) -> None:
         border-color:rgba(255,176,32,.5) !important; color:#FFD98A !important;
         min-height:46px !important; }}
 
+    /* ============ CHROME ============ */
     [data-baseweb="tab-list"] {{ gap:.45rem;
         border-bottom:1px solid rgba(212,175,55,.14) !important; }}
     [data-baseweb="tab"] {{ font-weight:900 !important;
@@ -1371,29 +1575,43 @@ def inject_theme(intro: bool = False) -> None:
         border-radius:14px; overflow:hidden; }}
     hr {{ border-color:rgba(212,175,55,.14) !important; }}
 
+    /* ============ CINEMATIC INTRO ============ */
+    /* Simple two-stop keyframes. The hold is expressed as an animation-DELAY
+       rather than as percentage stops inside the keyframe — same result, far
+       less for the compositor to interpolate, and no mid-timeline jumps. */
     @keyframes vipVeil {{ from {{ opacity:1; }}
-                        to   {{ opacity:0; visibility:hidden; }} }}
+                          to   {{ opacity:0; visibility:hidden; }} }}
     @keyframes vipMarkIn {{ from {{ opacity:0; transform:translateY(14px) scale(.972); }}
                             to   {{ opacity:1; transform:none; }} }}
     @keyframes vipRuleIn {{ from {{ width:0; opacity:0; }}
                             to   {{ width:210px; opacity:1; }} }}
     @keyframes vipRise {{ from {{ opacity:0; transform:translateY(16px); }}
-                        to   {{ opacity:1; transform:none; }} }}
+                          to   {{ opacity:1; transform:none; }} }}
     @keyframes vipBreathe {{ 0%,100%{{opacity:.5}} 50%{{opacity:1}} }}
 
+    /* THE GLITCH FIX.
+       A `position:fixed` element is trapped by ANY ancestor carrying a
+       transform, filter or backdrop-filter — that ancestor becomes its
+       containing block. The veil is injected inside a Streamlit element
+       container, and the reveal animation puts translateY() on those very
+       containers, so the veil was being dragged around mid-fade and could sit
+       over live controls. Its own container is therefore pinned static. */
     [data-testid="stElementContainer"]:has(.vip-veil),
     .stElementContainer:has(.vip-veil) {{
         animation:none !important; transform:none !important;
         filter:none !important; opacity:1 !important;
         position:static !important; contain:none !important; }}
 
+    /* pointer-events is none on the veil AND every descendant, from the first
+       frame — not switched at the end of the animation. An opaque full-screen
+       layer that failed to fade would otherwise lock every click in the app. */
     .vip-veil, .vip-veil * {{ pointer-events:none !important; }}
     .vip-veil {{
         position:fixed !important; inset:0; z-index:2147483000;
         display:flex; flex-direction:column; align-items:center;
         justify-content:center; will-change:opacity;
         background:radial-gradient(1000px 640px at 50% 44%,
-                   #12161C 0%, #05060B 62%, #000 100%);
+                    #12161C 0%, #05060B 62%, #000 100%);
         animation:vipVeil {fade:.2f}s cubic-bezier(.4,0,.2,1) {hold:.2f}s forwards; }}
     .vip-veil__mark {{
         font-family:'Playfair Display', Georgia, serif;
@@ -1413,6 +1631,8 @@ def inject_theme(intro: bool = False) -> None:
         text-align:center; text-transform:uppercase; padding:0 1.2rem;
         animation:vipMarkIn .5s cubic-bezier(.22,1,.36,1) .12s both; }}
     {reveal}
+    /* Accessibility + failsafe. If motion is suppressed nothing may be left at
+       opacity:0 — that would render the app permanently blank. */
     @media (prefers-reduced-motion: reduce) {{
         .vip-veil {{ display:none !important; }}
         [data-testid="stVerticalBlock"] > [data-testid="stElementContainer"],
@@ -1433,6 +1653,7 @@ def inject_theme(intro: bool = False) -> None:
 
 
 def splash_overlay() -> None:
+    """Cinematic veil. Injected ONCE per session — see inject_theme()."""
     _html(f"""
     <div class="vip-veil">
       <div class="vip-veil__mark">{esc(EVENT_NAME.upper())}</div>
@@ -1450,57 +1671,33 @@ def banner(path: Path, fallback: str) -> None:
               f"font-weight:900;color:{GOLD_SOFT};'>{esc(fallback)}</div>")
 
 
-# =============================================================================
-# NEW ADDITION: TOP LEAGUE TITLE & FOOTER SPONSORS/GALLERY
-# =============================================================================
-
-def render_top_titles() -> None:
-    _html("""
-    <div style="text-align:center; margin-bottom: 1.5rem;">
-      <h1 style="font-family:'Playfair Display',serif; color:#D4AF37; font-size:1.8rem; font-weight:900; margin:0; line-height:1.2;">
-        All India Gramin Cricket League<br>
-        <span style="color:#1FBF75; font-size:1.3rem;">Khelo Gramin</span>
-      </h1>
-      <p style="font-family:Inter,sans-serif; font-size:0.85rem; font-weight:700; letter-spacing:0.15em; margin-top:0.5rem; text-transform:uppercase;">
-        <span style="color:#1FBF75;">AIGCL Green</span> &nbsp;&middot;&nbsp; 
-        <span style="color:#FF4D5E;">Khelo Gramin Red</span>
-      </p>
+def render_top_branding() -> None:
+    """Renders the custom headline & subheadline above the header image."""
+    _html(f"""
+    <div style="text-align: center; margin-bottom: 1rem; margin-top: 0.5rem;">
+        <div class="show-title" style="font-size:clamp(1.8rem, 6vw, 3rem); margin-bottom: 0.2rem; filter:drop-shadow(0 4px 15px rgba(212,175,55,.3));">
+            All India gramin Cricket league
+        </div>
+        <div style="color:{EMERALD}; font-weight: 900; font-size: clamp(1rem, 3vw, 1.4rem); letter-spacing: 0.2em; text-transform: uppercase; text-shadow: 0 0 20px rgba(31,191,117,0.4);">
+            Khelo gramin
+        </div>
     </div>
     """)
 
 
-def render_sponsors_and_gallery() -> None:
-    # 5 Logos Section
-    _html("""
-    <div style="margin-top:2.5rem; text-align:center;">
-      <div class="eyebrow" style="margin-bottom:1rem;">Official Partners & Supporters</div>
-      <div style="display:flex; justify-content:center; align-items:center; gap:1.2rem; flex-wrap:wrap; opacity:0.85;">
-        <div style="font-weight:800; font-size:0.75rem; padding:10px 16px; background:rgba(255,255,255,0.04); border-radius:10px; border:1px solid rgba(212,175,55,0.25); color:#EFE8D8;">LOGO 1</div>
-        <div style="font-weight:800; font-size:0.75rem; padding:10px 16px; background:rgba(255,255,255,0.04); border-radius:10px; border:1px solid rgba(212,175,55,0.25); color:#EFE8D8;">LOGO 2</div>
-        <div style="font-weight:800; font-size:0.75rem; padding:10px 16px; background:rgba(255,255,255,0.04); border-radius:10px; border:1px solid rgba(212,175,55,0.25); color:#EFE8D8;">LOGO 3</div>
-        <div style="font-weight:800; font-size:0.75rem; padding:10px 16px; background:rgba(255,255,255,0.04); border-radius:10px; border:1px solid rgba(212,175,55,0.25); color:#EFE8D8;">LOGO 4</div>
-        <div style="font-weight:800; font-size:0.75rem; padding:10px 16px; background:rgba(255,255,255,0.04); border-radius:10px; border:1px solid rgba(212,175,55,0.25); color:#EFE8D8;">LOGO 5</div>
-      </div>
-    </div>
-    """)
-
-    # 4 Photos Section (Half size / 2 columns grid layout)
-    _html("""
-    <div style="margin-top:2.5rem; text-align:center;">
-      <div class="eyebrow" style="margin-bottom:1rem;">Glimpses & Highlights</div>
-    </div>
-    """)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("<div class='glass' style='text-align:center; padding:3rem 1rem; font-size:0.75rem; color:rgba(236,231,218,0.5); border-radius:14px;'>PHOTO 1 (Half Size)</div>", unsafe_allow_html=True)
-        st.markdown("<div class='glass' style='text-align:center; padding:3rem 1rem; font-size:0.75rem; color:rgba(236,231,218,0.5); border-radius:14px;'>PHOTO 2 (Half Size)</div>", unsafe_allow_html=True)
-    with col2:
-        st.markdown("<div class='glass' style='text-align:center; padding:3rem 1rem; font-size:0.75rem; color:rgba(236,231,218,0.5); border-radius:14px;'>PHOTO 3 (Half Size)</div>", unsafe_allow_html=True)
-        st.markdown("<div class='glass' style='text-align:center; padding:3rem 1rem; font-size:0.75rem; color:rgba(236,231,218,0.5); border-radius:14px;'>PHOTO 4 (Half Size)</div>", unsafe_allow_html=True)
+def render_sponsors() -> None:
+    """Renders 5 sponsor images side-by-side (scaled proportionally)."""
+    sponsor_paths = [BASE_DIR / f"sponcer {i}.png" for i in range(1, 6)]
+    if any(p.exists() for p in sponsor_paths):
+        _html('<div style="text-align:center; margin-top: 1.5rem; margin-bottom: 1rem;"><span class="eyebrow">OUR SPONSORS</span></div>')
+        cols = st.columns(5)
+        for i, col in enumerate(cols):
+            if sponsor_paths[i].exists():
+                col.image(str(sponsor_paths[i]), use_container_width=True)
 
 
 def hero() -> None:
+    # A real anchor, target=_blank, rel=noopener — it must actually open Maps.
     maps_chip = (
         f'<a class="chip chip--map" href="{esc(MAPS_URL)}" target="_blank" '
         f'rel="noopener noreferrer"><b>Map</b><span>Directions &#8599;</span></a>'
@@ -1551,7 +1748,7 @@ def tracker(booked: int, total: int) -> None:
     <style>
     @keyframes fillbar {{ from {{width:0%}} to {{width:{pct:.2f}%}} }}
     .trk-live {{ animation:fillbar 1.2s cubic-bezier(.22,1,.36,1) both,
-                        shimmer 2.8s linear infinite; }}
+                           shimmer 2.8s linear infinite; }}
     </style>
     <div class="glass" style="padding:1.3rem 1.6rem;">
       <div style="display:flex;justify-content:space-between;margin-bottom:.75rem;">
@@ -1570,11 +1767,28 @@ def tracker(booked: int, total: int) -> None:
 
 
 # =============================================================================
-# 10. BROWSER SIDE-EFFECTS
+# 10. BROWSER SIDE-EFFECTS  (auto-download, scanner focus, gate tones)
 # =============================================================================
 
 
 def auto_download(jpeg: bytes, filename: str, fire_key: str) -> None:
+    """
+    Best-effort automatic save. Fired ONCE per issued pass — an ungated version
+    would re-trigger on every Streamlit rerun and spam the user's downloads.
+
+    Honest about the limits. Programmatic downloads are actively restricted:
+      * st.markdown strips <script>, so this MUST go through components.html,
+        which renders in a sandboxed iframe;
+      * Chrome blocks downloads from sandboxed iframes lacking allow-downloads,
+        so the script first tries window.parent.document to step outside it;
+      * browsers require a recent user gesture, and the form submit's gesture
+        has usually expired by the time this component mounts;
+      * iOS Safari largely ignores the `download` attribute and will open the
+        image in a tab instead.
+    Net effect: reliable on desktop Chrome/Edge/Firefox, unreliable on mobile
+    Safari. The inline image and the download button below it are therefore the
+    real delivery path on phones, not a fallback.
+    """
     if st.session_state.get("_auto_dl") == fire_key:
         return
     st.session_state["_auto_dl"] = fire_key
@@ -1609,6 +1823,7 @@ def auto_download(jpeg: bytes, filename: str, fire_key: str) -> None:
 
 
 GATE_TONES: Final[dict[str, str]] = {
+    # [frequency Hz, seconds, waveform]
     GRANTED:    '[[880,0.10,"sine"],[1320,0.16,"sine"]]',
     DUPLICATE:  '[[520,0.22,"square"],[400,0.30,"square"]]',
     INVALID:    '[[190,0.42,"sawtooth"]]',
@@ -1618,7 +1833,19 @@ GATE_TONES: Final[dict[str, str]] = {
 
 
 def gate_side_effects(verdict: str | None, beep: bool, nonce: str,
-                     focus: bool = True) -> None:
+                      focus: bool = True) -> None:
+    """
+    Two gate-only browser tricks in a single iframe:
+      1. Re-focus the manual field after a rerun. A hardware gun types into
+         whatever has focus; without this the operator must tap the box after
+         each scan, which destroys the point of clear_on_submit. Suppressed
+         while the camera is live — focusing a text field on a phone throws the
+         on-screen keyboard over the viewfinder.
+      2. Play a verdict tone. Distinct sounds mean the operator can wave people
+         through without looking at the screen.
+    Both are best-effort: the iframe may be cross-origin, and browsers gate
+    AudioContext behind a user gesture. Silent failure, never an exception.
+    """
     tones = GATE_TONES.get(verdict or "", "[]") if beep and verdict else "[]"
     want_focus = "1" if focus else "0"
     components_html(
@@ -1660,6 +1887,33 @@ def gate_side_effects(verdict: str | None, beep: bool, nonce: str,
 # =============================================================================
 # 10b. LIVE CAMERA SCANNER
 # =============================================================================
+# Three hard browser facts drive this design. None are optional.
+#
+# 1. getUserMedia needs a SECURE CONTEXT — https:// or localhost, full stop.
+#    Opening the app on a phone at http://192.168.x.x:8501 gives a permanently
+#    dead camera and a misleading "permission denied". Deploy over https.
+#
+# 2. components.v1.html renders inside an IFRAME, and an iframe only gets the
+#    camera if the parent tags it `allow="camera"`. Streamlit does not. The
+#    iframe is same-origin though (its sandbox includes allow-same-origin —
+#    the same fact the auto-download hack already relies on), so the document
+#    reaches up, writes the attribute onto its OWN iframe element, and
+#    re-assigns srcdoc to force one silent reload. A data-attribute guard on
+#    the parent element survives that reload and prevents a loop.
+#
+# 3. components.v1.html is NOT bi-directional. `Streamlit.setComponentValue`
+#    exists only for components built with declare_component, which needs a
+#    compiled JS bundle — impossible in a single-file app. So the payload is
+#    relayed by writing into a real (off-screen) Streamlit text_input using
+#    React's native value setter, firing an input event, then clicking that
+#    form's submit. Assigning .value directly does nothing: React tracks the
+#    internal value node and silently discards the change.
+#
+# Plus one design fact: a camera re-reads the SAME QR ten times a second.
+# Unsuppressed, one guest produces one GRANTED and twenty DUPLICATE alarms —
+# which would make the duplicate detection useless exactly when it matters. So
+# the scanner freezes the frame on a hit and holds a per-payload cooldown, and
+# Python independently ignores a repeat of the same raw string.
 
 CAM_COOLDOWN_MS: Final[int] = 4000
 SCAN_COOLDOWN_S: Final[float] = 3.5
@@ -1673,6 +1927,7 @@ _CAMERA_HTML = """
     -webkit-font-smoothing:antialiased;}
   #wrap{display:flex;flex-direction:column;align-items:center;gap:.65rem;}
 
+  /* ---- viewfinder ---- */
   .shell{position:relative;width:100%;max-width:320px;aspect-ratio:1/1;
     border-radius:24px;overflow:hidden;background:#05060B;
     border:1px solid rgba(212,175,55,.45);
@@ -1685,9 +1940,11 @@ _CAMERA_HTML = """
   #reader__dashboard{display:none!important;}
   #reader__scan_region{height:100%!important;display:flex!important;
     align-items:center!important;justify-content:center!important;}
+  /* html5-qrcode paints its own white scan box — we draw a better one */
   #qr-shaded-region{border:none!important;background:transparent!important;}
   #qr-shaded-region div{background:rgba(0,0,0,.34)!important;}
 
+  /* ---- gold corner reticle ---- */
   .ret{position:absolute;inset:0;pointer-events:none;}
   .ret i{position:absolute;width:36px;height:36px;border:2px solid %%GOLD%%;
     filter:drop-shadow(0 0 6px rgba(212,175,55,.7));}
@@ -1705,6 +1962,7 @@ _CAMERA_HTML = """
   @keyframes sweep{0%,100%{top:10%;opacity:.15}50%{top:88%;opacity:1}}
   #shot{display:none;}
 
+  /* ---- status chip ---- */
   .badge{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);
     max-width:88%;padding:.42rem .95rem;border-radius:999px;font-size:.66rem;
     font-weight:800;letter-spacing:.14em;text-transform:uppercase;
@@ -1717,11 +1975,13 @@ _CAMERA_HTML = """
     box-shadow:0 0 22px rgba(255,77,94,.34);}
   .badge.warn{border-color:%%AMBER%%;color:%%AMBER%%;}
 
+  /* capture flash */
   .flash{position:absolute;inset:0;background:%%EMERALD%%;opacity:0;
     pointer-events:none;}
   .flash.go{animation:pop .42s ease-out;}
   @keyframes pop{0%{opacity:.55}100%{opacity:0}}
 
+  /* ---- controls ---- */
   .bar{display:flex;gap:.45rem;flex-wrap:wrap;justify-content:center;
     width:100%;max-width:320px;}
   .bar button{flex:1 1 0;min-width:66px;min-height:42px;padding:0 .5rem;
@@ -1736,6 +1996,7 @@ _CAMERA_HTML = """
   .bar button[disabled]{opacity:.34;cursor:not-allowed;}
   .bar button.live{background:linear-gradient(135deg,#2FE08D,#0F9B5C);
     color:#04140C;border-color:transparent;}
+  /* the fallback that always works, so it must not look like an afterthought */
   #b-shot{border-color:rgba(212,175,55,.85);background:rgba(212,175,55,.2);
     color:%%GOLD_SOFT%%;}
   .note{font-size:.6rem;letter-spacing:.1em;line-height:1.6;text-align:center;
@@ -1790,11 +2051,15 @@ _CAMERA_HTML = """
     badge.className = "badge " + (cls || "");
   }
   function tell(html) { note.innerHTML = html; }
+  /* Names the exact stage that failed. A scanner that silently does nothing is
+     undebuggable at a venue; a scanner that says "relay field not found" is a
+     two-minute fix. */
   function diag(text) {
     var el = document.getElementById("diag");
     if (el) el.textContent = "relay: " + text;
   }
 
+  /* ---------- 1. give our own iframe the camera permission policy ---------- */
   function ownFrame() {
     try {
       var list = window.parent.document.getElementsByTagName("iframe");
@@ -1807,17 +2072,35 @@ _CAMERA_HTML = """
 
   function policyReady() {
     var f = ownFrame();
-    if (!f) return true;
+    if (!f) return true;                       /* cross-origin: try regardless */
     var allow = f.getAttribute("allow") || "";
     if (allow.indexOf("camera") !== -1) return true;
-    if (f.getAttribute("data-gpl-cam") === "1") return true;
+    if (f.getAttribute("data-gpl-cam") === "1") return true;   /* patched once */
     f.setAttribute("data-gpl-cam", "1");
     f.setAttribute("allow", "camera;microphone;fullscreen");
+    /* the attribute only binds on navigation, so re-run this document once */
     var sd = f.getAttribute("srcdoc");
     if (sd !== null) { f.setAttribute("srcdoc", sd); }
     else { f.setAttribute("src", f.getAttribute("src") || ""); }
     return false;
   }
+
+  /* ---------- 2. hand the payload to Streamlit ----------
+     THE SUBTLE PART, and the reason a naive version scans but never verifies.
+
+     Streamlit's text_input inside a form does NOT push each keystroke to its
+     widget manager. onChange only marks the component "dirty" and parks the
+     text in local React state; the value is committed on blur, on Enter, or
+     when the focused field loses focus to the submit button. A programmatic
+     .click() blurs nothing — the field was never focused — so submitForm ships
+     the PREVIOUS committed value, i.e. the empty string. The scan then arrives
+     server-side as "", process_scan() drops it, and the page reruns with no
+     verdict at all. Camera fine, decode fine, nothing on screen.
+
+     So the value has to be committed explicitly, three independent ways,
+     because which one a given Streamlit build honours varies:
+       focus -> native setter -> input/change -> Enter -> blur -> click.
+     Any one of those committing is enough; the rest are harmless no-ops. */
 
   function relayTargets() {
     var W = window.parent, D = W.document;
@@ -1840,6 +2123,7 @@ _CAMERA_HTML = """
     box.dispatchEvent(new Ev("input", { bubbles: true }));
     box.dispatchEvent(new Ev("change", { bubbles: true }));
 
+    /* Enter commits the value AND submits the form in one go */
     ["keydown", "keypress", "keyup"].forEach(function (type) {
       try {
         box.dispatchEvent(new KEv(type, {
@@ -1847,6 +2131,7 @@ _CAMERA_HTML = """
         }));
       } catch (e) {}
     });
+    /* blur commits on builds that ignore synthetic key events */
     try { box.blur(); } catch (e) {}
   }
 
@@ -1857,8 +2142,9 @@ _CAMERA_HTML = """
 
     if (!t.box) { diag("relay field not found"); return false; }
     writeInto(t, t.box, payload);
-    diag("committed \u2192 waiting for Streamlit");
+    diag("committed \\u2192 waiting for Streamlit");
 
+    /* and finally the button, in case neither Enter nor blur committed */
     setTimeout(function () {
       try {
         var again = relayTargets();
@@ -1866,6 +2152,9 @@ _CAMERA_HTML = """
       } catch (e) {}
     }, 110);
 
+    /* Did it land? clear_on_submit empties the field on a successful rerun,
+       so an unchanged field means Streamlit never took it. Fall back to the
+       visible manual box, which is a completely different DOM path. */
     setTimeout(function () { confirm(payload, 0); }, 900);
     return true;
   }
@@ -1882,6 +2171,7 @@ _CAMERA_HTML = """
       setTimeout(function () { confirm(payload, tries + 1); }, 900);
       return;
     }
+    /* last resort: drive the visible manual override field instead */
     try {
       var D = window.parent.document;
       var mbox = D.querySelector(".st-key-gate_field input");
@@ -1899,6 +2189,7 @@ _CAMERA_HTML = """
        + "Use <b>Manual override</b> and tell the developer: relay-no-commit.");
   }
 
+  /* ---------- 3. a hit ---------- */
   function onHit(text) {
     var now = Date.now();
     if (text === lastText && now - lastAt < COOLDOWN) return;
@@ -1909,20 +2200,21 @@ _CAMERA_HTML = """
     flash.classList.add("go");
 
     try { qr.pause(true); } catch (e) {}
-    var short = text.length > 30 ? text.slice(0, 30) + "\u2026" : text;
+    var short = text.length > 30 ? text.slice(0, 30) + "\\u2026" : text;
 
     if (relay(text)) {
-      say("Captured \u00b7 " + short, "ok");
+      say("Captured \\u00b7 " + short, "ok");
     } else {
       say("Could not reach the form", "bad");
       tell("The page did not accept the scan. Use <b>Manual override</b> below.");
     }
     setTimeout(function () {
       try { qr.resume(); } catch (e) {}
-      if (live) say("Ready \u00b7 point at a pass", "");
+      if (live) say("Ready \\u00b7 point at a pass", "");
     }, 2200);
   }
 
+  /* ---------- 4. torch ---------- */
   function torchable() {
     try {
       var caps = qr.getRunningTrackCapabilities();
@@ -1938,18 +2230,28 @@ _CAMERA_HTML = """
     } catch (e) { return false; }
   }
 
+  /* ---------- 5. start / stop ---------- */
   var frames = 0, lastTick = 0;
 
+  /* html5-qrcode calls this on EVERY frame that contains no code. That makes
+     it the proof-of-life for the decode loop: a climbing count means the
+     camera and the scanner are both fine and it is purely a framing problem,
+     while a stuck count means the loop itself died. Without this the operator
+     just sees "relay: idle" forever and has no idea which half is broken. */
   function onScanFail() {
     frames++;
     var now = Date.now();
     if (now - lastTick > 1000) {
       lastTick = now;
-      diag("scanning \u00b7 " + frames + " frames \u00b7 no code yet");
+      diag("scanning \\u00b7 " + frames + " frames \\u00b7 no code yet");
     }
+    /* ~6 seconds of clean frames with nothing decoded is almost always the
+       operator holding the pass too close, so the white quiet zone around the
+       QR is cropped by the frame edge and the finder patterns cannot be
+       located. Coach it rather than sit there silently saying READY. */
     if (frames === 60) {
       tell("Not reading. Move the phone <b>back</b> until the whole QR and its "
-         + "white border are inside the view \u2014 or just tap <b>PHOTO</b>.");
+         + "white border are inside the view \\u2014 or just tap <b>PHOTO</b>.");
     }
   }
 
@@ -1965,6 +2267,14 @@ _CAMERA_HTML = """
     say("Starting camera", "");
     bStart.disabled = true;
 
+    /* NO qrbox — and that is the whole point.
+       html5-qrcode CROPS each frame down to qrbox before it even tries to
+       decode. A centred 72% box sounds helpful and is actively harmful: hold a
+       pass close enough to be sharp and the QR overflows the box, hold it far
+       enough to fit and the modules are too small to resolve. Either way the
+       decoder never sees a complete code and the scanner appears dead while
+       the video looks perfect. Omitting qrbox scans the entire frame, so
+       whatever the operator can see is what gets decoded. */
     var cfg = { fps: 10, disableFlip: false,
                 useBarCodeDetectorIfSupported: true };
     try {
@@ -1981,11 +2291,15 @@ _CAMERA_HTML = """
         bStart.classList.add("live");
         bStart.disabled = false;
         bFlip.disabled = false;
-        say("Ready \u00b7 point at a pass", "");
-        tell("Fill about <b>half the frame</b> \u2014 the whole QR plus a little "
-            + "white margin must be visible. If it will not read, tap "
-            + "<b>PHOTO</b>.");
-        diag("scanning \u00b7 waiting for a code");
+        say("Ready \\u00b7 point at a pass", "");
+        tell("Fill about <b>half the frame</b> \\u2014 the whole QR plus a little "
+           + "white margin must be visible. If it will not read, tap "
+           + "<b>PHOTO</b>.");
+        diag("scanning \\u00b7 waiting for a code");
+        /* A sharper, larger feed decodes a printed pass from much further out,
+           and continuous focus is what makes close-up scans resolve at all.
+           Both are best-effort: iOS ignores focusMode, older Android ignores
+           the resolution hint, and neither failing matters. */
         try {
           qr.applyVideoConstraints({
             width: { ideal: 1280 }, height: { ideal: 720 },
@@ -2033,6 +2347,10 @@ _CAMERA_HTML = """
     }).catch(function () { if (cb) cb(); });
   }
 
+  /* Bind defensively. Every listener below lives in one IIFE, so a single null
+     element — a renamed id, a trimmed control — would throw and take the whole
+     scanner down with it, camera included. A dead Photo button is survivable;
+     a dead scanner at the gate is not. */
   function on(el, ev, fn) {
     if (el && el.addEventListener) { el.addEventListener(ev, fn); }
   }
@@ -2044,6 +2362,12 @@ _CAMERA_HTML = """
   });
   on(bTorch, "click", function () { setTorch(!torchOn); });
 
+  /* ---------- 5b. photo fallback ----------
+     A still photo is captured at the sensor's full resolution rather than the
+     downscaled preview stream, and it is sharp rather than motion-blurred, so
+     it decodes passes the live loop cannot — a glossy print under a spotlight,
+     a dim lobby, a screen with moire. It is the guaranteed path: if this fails
+     the QR genuinely is unreadable, and the operator falls back to typing. */
   var shot = document.getElementById("shot");
   on(bShot, "click", function () { if (shot) shot.click(); });
   on(shot, "change", function () {
@@ -2068,11 +2392,13 @@ _CAMERA_HTML = """
     if (live) { stop(decode); } else { decode(); }
   });
 
+  /* release the camera if the tab is hidden or the frame is torn down */
   on(document, "visibilitychange", function () {
     if (document.hidden && live) { stop(); }
   });
   window.addEventListener("pagehide", function () { try { stop(); } catch (e) {} });
 
+  /* ---------- 6. boot ---------- */
   function loadLib(i) {
     if (i >= CDNS.length) {
       say("Scanner failed to load", "bad");
@@ -2096,6 +2422,13 @@ _CAMERA_HTML = """
 
 @lru_cache(maxsize=1)
 def camera_html() -> str:
+    """
+    Byte-identical on every rerun, deliberately. Streamlit only rebuilds a
+    components.html iframe when its markup changes — hand it the same string
+    and React keeps the existing element, so the camera survives the check-in
+    rerun instead of restarting (and re-prompting) after every single guest.
+    That is also why nothing dynamic may ever be interpolated in here.
+    """
     return (_CAMERA_HTML
             .replace("%%GOLD%%", GOLD)
             .replace("%%GOLD_SOFT%%", GOLD_SOFT)
@@ -2143,6 +2476,11 @@ def validate(name: str, organisation: str, phone: str) -> list[str]:
 
 
 def render_issued_pass() -> None:
+    """
+    Confirmation. Auto-save fires once, the pass renders inline for
+    long-press-to-save, and a styled download button backs it up.
+    Intentionally NO 'claim another pass' action — one pass per number.
+    """
     issued = st.session_state.get(ISSUED_KEY)
     if not issued:
         return
@@ -2160,7 +2498,7 @@ def render_issued_pass() -> None:
            margin:1.1rem 0 .2rem;">{esc(seat_id)}</div>
       <div class="show-sub">{esc(EVENT_SUBTITLE)}</div>
       <div class="micro">{esc(row['name'])} &nbsp;&middot;&nbsp;
-            {esc(row['organisation'])} &nbsp;&middot;&nbsp; {esc(row['phone'])}</div>
+           {esc(row['organisation'])} &nbsp;&middot;&nbsp; {esc(row['phone'])}</div>
     </div>
     """)
 
@@ -2219,7 +2557,7 @@ def render_claim(df: pd.DataFrame) -> None:
         name = st.text_input("Full Name", max_chars=60,
                              placeholder="Exactly as printed on your ID")
         organisation = st.text_input("Organisation / Team", max_chars=60,
-                                   placeholder="Company, franchise or club")
+                                     placeholder="Company, franchise or club")
         phone = st.text_input("WhatsApp Number", max_chars=10,
                               placeholder="10 digits, starting 6–9")
         submitted = st.form_submit_button("CLAIM ENTRY PASS", type="primary")
@@ -2276,6 +2614,7 @@ def admin_login() -> bool:
 
 
 VERDICT_SKIN: Final[dict[str, tuple[str, str, str]]] = {
+    #                 css-modifier, icon, headline
     GRANTED:    ("ok",   "✅", "AUTHENTICATED &middot; ENTRY GRANTED"),
     DUPLICATE:  ("dupe", "❌", "DUPLICATE ENTRY &middot; ALREADY SCANNED"),
     NOT_ISSUED: ("bad",  "🚫", "PASS NOT ISSUED"),
@@ -2351,11 +2690,22 @@ def render_log() -> None:
 
 
 def salt_fingerprint() -> str:
+    """
+    A short, non-reversible tag for the active salt. Never reveals the salt, but
+    lets you tell at a glance whether it changed since the passes were printed —
+    which is the other way a perfectly good QR reads INVALID at the gate.
+    """
     return hashlib.sha256(("fingerprint|" + SECURITY_SALT).encode("utf-8")
                           ).hexdigest()[:8].upper()
 
 
 def explain_payload(raw: str) -> list[tuple[str, bool, str]]:
+    """
+    Step-by-step account of why a scanned string was accepted or rejected.
+    Returns (step, passed, detail). This exists because "invalid pass" on its
+    own is useless at 6pm with a queue building — the operator needs to know
+    whether it is a fake, a smudged scan, or a salt that changed after printing.
+    """
     steps: list[tuple[str, bool, str]] = []
     raw = (raw or "").strip()
 
@@ -2410,15 +2760,27 @@ LAST_SEEN: Final[str] = "gate_last_seen"
 
 
 def note_arrival(raw: str, source: str) -> None:
+    """Record what actually reached the server, empty strings included."""
     st.session_state[LAST_SEEN] = {
         "raw": raw or "", "source": source, "at": clock_ist(),
     }
 
 
 def reload_seats(fallback: pd.DataFrame) -> pd.DataFrame:
+    """
+    Re-read after the gate may have written.
+
+    main() loads the sheet once, at the top, and hands that frame to every tab.
+    But the gate tab renders FIRST and writes a check-in during that same run,
+    so the guest list and the counters further down were rendering data from
+    before the write — a check-in that had genuinely been saved still showed as
+    "not arrived" until the next interaction. Reads are cached for STATS_TTL and
+    save_seats() clears that cache, so this is free when nothing changed and
+    correct when something did.
+    """
     try:
         return load_seats()
-    except Exception:
+    except Exception:                        # noqa: BLE001 — keep the tab alive
         return fallback
 
 
@@ -2426,6 +2788,16 @@ LAST_RAW: Final[str] = "gate_last_raw"
 
 
 def process_scan(raw: str, allow_manual: bool, source: str) -> str | None:
+    """
+    Single authentication path. The camera and the manual box both land here,
+    so a payload cannot take a shortcut around the signature check.
+
+    Returns the verdict for the audio cue, or None when the scan was swallowed
+    as a repeat. Burst suppression is the important bit: a camera re-reads the
+    same QR many times a second, and without this the operator would get one
+    GRANTED followed by a wall of DUPLICATE alarms for a guest who did nothing
+    wrong. Suppressing here also spares Google Sheets a write per frame.
+    """
     raw = (raw or "").strip()
     if not raw:
         return None
@@ -2434,9 +2806,13 @@ def process_scan(raw: str, allow_manual: bool, source: str) -> str | None:
     now = time.monotonic()
     if previous and previous[0] == raw and now - previous[1] < SCAN_COOLDOWN_S:
         st.session_state[LAST_RAW] = (raw, now)
-        return None
+        return None                      # same code, still on screen — ignore
     st.session_state[LAST_RAW] = (raw, now)
 
+    # A camera decodes QR codes; it cannot produce a bare "42". Enforcing that
+    # here rather than trusting the caller's flag means a future edit to the
+    # gate UI cannot accidentally turn the viewfinder into an unsigned-entry
+    # path — the invariant lives with the check, not with the convention.
     if source == "camera":
         allow_manual = False
 
@@ -2461,6 +2837,17 @@ def process_scan(raw: str, allow_manual: bool, source: str) -> str | None:
 
 
 def render_gate(df: pd.DataFrame) -> None:
+    # Counters are deliberately NOT computed here. A check-in written further
+    # down this function would make them stale on the very run that mattered,
+    # so they are read fresh in step 8 instead.
+
+    # ELEMENT ORDER MATTERS ABOVE THE CAMERA.
+    # Streamlit reconciles components by position. If the number of elements
+    # before the camera iframe changed between runs, React would rebuild the
+    # iframe and the camera would restart after every guest. So positions 1-2
+    # are unconditional, and every conditional block lives further down.
+
+    # -- 1. header (always rendered) ------------------------------------------
     _html(f"""
     <div class="glass" style="padding:1.2rem 1.5rem;">
       <span class="pill">GATE SCANNER</span>
@@ -2473,6 +2860,7 @@ def render_gate(df: pd.DataFrame) -> None:
     </div>
     """)
 
+    # -- 2. controls (always rendered, so the camera's index never moves) -----
     opt_a, opt_b, opt_c = st.columns(3)
     camera_on = opt_a.toggle("Camera", value=True, key="gate_camera",
                              help="Live rear-camera scanning. Turn off to save "
@@ -2485,17 +2873,22 @@ def render_gate(df: pd.DataFrame) -> None:
                                      "No signature is checked, so keep it off "
                                      "unless you need it.")
 
+    # -- 3. the camera -------------------------------------------------------
     if camera_on:
         components_html(camera_html(), height=520, scrolling=False)
     else:
         components_html(CAMERA_OFF_HTML, height=170, scrolling=False)
 
+    # -- 4. relay: where the camera drops its payload ------------------------
+    # Off-screen, not display:none — a clipped element still takes programmatic
+    # input events and clicks, and Streamlit still commits the form.
     with st.container(key=RELAY_KEY):
         with st.form("gate_relay_form", clear_on_submit=True, border=False):
             cam_raw = st.text_input("Camera relay", key=f"{RELAY_KEY}_field",
                                     label_visibility="collapsed")
             cam_submitted = st.form_submit_button("relay")
 
+    # -- 5. manual override --------------------------------------------------
     with st.container(key="gate_form"):
         with st.form("gate_scan", clear_on_submit=True, border=False):
             raw = st.text_input(
@@ -2506,9 +2899,12 @@ def render_gate(df: pd.DataFrame) -> None:
             )
             scanned = st.form_submit_button("CHECK IN MANUALLY", type="primary")
 
+    # -- 6. authenticate -----------------------------------------------------
     verdict_for_tone: str | None = None
     if cam_submitted:
         note_arrival(cam_raw, "camera")
+        # A camera only ever produces a signed payload, so manual bare numbers
+        # are never honoured on this path regardless of the toggle.
         verdict_for_tone = process_scan(cam_raw, False, "camera")
     elif scanned:
         note_arrival(raw, "manual")
@@ -2517,6 +2913,7 @@ def render_gate(df: pd.DataFrame) -> None:
         else:
             verdict_for_tone = process_scan(raw, allow_manual, "manual")
 
+    # -- 7. verdict ----------------------------------------------------------
     result = st.session_state.get(SCAN_RESULT)
     if result:
         render_verdict(result)
@@ -2540,6 +2937,9 @@ def render_gate(df: pd.DataFrame) -> None:
         </div>
         """)
 
+    # -- 8. counters, warnings, log (conditional blocks live below the camera)
+    # Re-read: a check-in was very likely just written a few lines above, and
+    # the frame main() handed us predates it.
     df = reload_seats(df)
     issued = int((df["status"] == BOOKED).sum())
     arrived = int(((df["status"] == BOOKED) &
@@ -2559,6 +2959,10 @@ def render_gate(df: pd.DataFrame) -> None:
 
     render_log()
 
+    # -- 9. diagnostics ------------------------------------------------------
+    # Turns "it scans but nothing happens" into a one-line answer: either
+    # nothing reached the server (relay problem) or something did and the
+    # signature failed (salt problem).
     with st.expander("Scan diagnostics"):
         seen = st.session_state.get(LAST_SEEN)
         if not seen:
@@ -2577,6 +2981,8 @@ def render_gate(df: pd.DataFrame) -> None:
                    "changed since the passes were printed, every QR will read "
                    "as invalid.")
 
+    # Focusing the manual box pops the on-screen keyboard over the viewfinder,
+    # so it is only done when the camera is off.
     gate_side_effects(
         verdict_for_tone, beep, focus=not camera_on,
         nonce=f"{clock_ist()}-{len(st.session_state.get(SCAN_LOG, []))}",
@@ -2696,6 +3102,7 @@ def render_admin(df: pd.DataFrame) -> None:
     with gate_tab:
         render_gate(df)
     with list_tab:
+        # The gate tab rendered first and may have just written a check-in.
         render_guest_list(reload_seats(df))
     with db_tab:
         render_database(reload_seats(df))
@@ -2710,6 +3117,9 @@ def main() -> None:
     st.set_page_config(page_title=f"{EVENT_NAME} — VIP Entry Pass",
                        page_icon="🏏", layout="centered")
 
+    # First script run of this browser session only. Streamlit re-executes the
+    # whole script on every interaction, so an ungated intro would blackout the
+    # screen again on every form submit — including every single gate scan.
     intro = not st.session_state.get("_intro_played", False)
     st.session_state["_intro_played"] = True
 
@@ -2717,13 +3127,12 @@ def main() -> None:
     if intro:
         splash_overlay()
 
-    # --- Naye Titles Header Banner ke theek upar add kiye gaye hain ---
-    render_top_titles()
+    render_top_branding()
     banner(HEADER_IMG, EVENT_NAME.upper())
 
     try:
         df = load_seats()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — surface config errors to the operator
         st.error(f"Could not read the Google Sheet: {exc}", icon="🔌")
         banner(FOOTER_IMG, VENUE.upper())
         st.stop()
@@ -2742,9 +3151,7 @@ def main() -> None:
 
     st.divider()
     banner(FOOTER_IMG, VENUE.upper())
-    
-    # --- Footer Banner ke niche 5 Logos aur 4 Photos (Half-size grid) add kiye gaye hain ---
-    render_sponsors_and_gallery()
+    render_sponsors()
 
 
 if __name__ == "__main__":
