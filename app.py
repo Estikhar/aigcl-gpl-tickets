@@ -1712,6 +1712,20 @@ def render_sponsors() -> None:
               f'{"".join(img_tags)}</div>')
 
 
+def render_footer_credits() -> None:
+    """Renders the final rights reserved statement and contact email."""
+    _html(f"""
+    <div style="text-align: center; margin-top: 2.5rem; padding-bottom: 1rem;">
+        <div style="color:rgba(236,231,218,.4); font-size: .65rem; letter-spacing: .15em; text-transform: uppercase;">
+            &copy; {datetime.now(IST).year} All Rights Reserved
+        </div>
+        <div style="margin-top: 0.4rem;">
+            <a href="mailto:mioghub@gmail.com" style="color:{GOLD_SOFT}; font-size: .75rem; text-decoration: none; letter-spacing: .05em; font-weight: 600;">mioghub@gmail.com</a>
+        </div>
+    </div>
+    """)
+
+
 def hero() -> None:
     # A real anchor, target=_blank, rel=noopener — it must actually open Maps.
     maps_chip = (
@@ -3168,6 +3182,7 @@ def main() -> None:
     st.divider()
     banner(FOOTER_IMG, VENUE.upper())
     render_sponsors()
+    render_footer_credits()
 
 
 if __name__ == "__main__":
