@@ -61,11 +61,11 @@
  Assets next to app.py:
      header.png            edge-bleed artwork on the ticket + web hero
      footer.png            web page footer
-     sponcer 1.png         sponsor logo 1 (rendered at bottom)
-     sponcer 2.png         sponsor logo 2
-     sponcer 3.png         sponsor logo 3
-     sponcer 4.png         sponsor logo 4
-     sponcer 5.png         sponsor logo 5
+     sponsor1.png          sponsor logo 1 (rendered at bottom)
+     sponsor2.png          sponsor logo 2
+     sponsor3.png          sponsor logo 3
+     sponsor4.png          sponsor logo 4
+     sponsor5.png          sponsor logo 5
      assets/*.ttf          OPTIONAL. Fetched once on first run if absent.
 ================================================================================
 """
@@ -1687,7 +1687,7 @@ def render_top_branding() -> None:
 
 def render_sponsors() -> None:
     """Renders 5 sponsor images side-by-side (scaled proportionally)."""
-    sponsor_paths = [BASE_DIR / f"sponcer {i}.png" for i in range(1, 6)]
+    sponsor_paths = [BASE_DIR / f"sponsor{i}.png" for i in range(1, 6)]
     if any(p.exists() for p in sponsor_paths):
         _html('<div style="text-align:center; margin-top: 1.5rem; margin-bottom: 1rem;"><span class="eyebrow">OUR SPONSORS</span></div>')
         cols = st.columns(5)
