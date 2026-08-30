@@ -55,7 +55,7 @@
      [app]
      admin_password = "..."
      security_salt  = "long-random-string-keep-private"
-     event_time     = "6:00 PM"
+     event_time     = "1:00 AM"
      maps_url       = "https://maps.app.goo.gl/..."
 
  Assets next to app.py:
