@@ -15,9 +15,9 @@
    A hardware QR scanner types the ticket payload and presses Enter. The form
    is clear_on_submit so scanning is continuous — no mouse, no tapping.
    Three and only three verdicts:
-       INVALID       payload fails the HMAC, or the pass was never issued
-       DUPLICATE     checkin_time already stamped — someone used this pass
-       AUTHENTICATED checkin_time written, guest walks in
+        INVALID        payload fails the HMAC, or the pass was never issued
+        DUPLICATE      checkin_time already stamped — someone used this pass
+        AUTHENTICATED checkin_time written, guest walks in
 
  SECURITY MODEL — read this before deploying
    The QR carries  VALIDATE|Pass-42|<10-hex>  where the hex is a truncated
@@ -47,21 +47,21 @@
  Run:   streamlit run app.py
 
  .streamlit/secrets.toml
-     [connections.gsheets]
-     spreadsheet = "https://docs.google.com/spreadsheets/d/..."
-     type = "service_account"
-     ...service account keys...
+      [connections.gsheets]
+      spreadsheet = "https://docs.google.com/spreadsheets/d/..."
+      type = "service_account"
+      ...service account keys...
 
-     [app]
-     admin_password = "..."
-     security_salt  = "long-random-string-keep-private"
-     event_time     = "6:00 PM"
-     maps_url       = "https://maps.app.goo.gl/..."
+      [app]
+      admin_password = "..."
+      security_salt  = "long-random-string-keep-private"
+      event_time     = "6:00 PM"
+      maps_url       = "https://maps.app.goo.gl/..."
 
  Assets next to app.py:
-     header.png            edge-bleed artwork on the ticket + web hero
-     footer.png            web page footer
-     assets/*.ttf          OPTIONAL. Fetched once on first run if absent.
+      header.png             edge-bleed artwork on the ticket + web hero
+      footer.png             web page footer
+      assets/*.ttf           OPTIONAL. Fetched once on first run if absent.
 ================================================================================
 """
 
@@ -236,14 +236,14 @@ def _fetch_font(name: str) -> Path | None:
         ASSET_DIR.mkdir(parents=True, exist_ok=True)
         with urllib.request.urlopen(FONT_SOURCES[name], timeout=12) as response:
             payload = response.read()
-        if len(payload) < 20_000:          # obviously not a font
+        if len(payload) < 20_000:
             return None
         tmp = target.with_suffix(".part")
         tmp.write_bytes(payload)
-        ImageFont.truetype(str(tmp), 24)   # prove it parses before publishing
+        ImageFont.truetype(str(tmp), 24)
         tmp.replace(target)
         return target
-    except Exception:                        # noqa: BLE001 — never fatal
+    except Exception:
         return None
 
 
@@ -256,7 +256,7 @@ def _face(role: str) -> tuple[str | None, str | None]:
         for candidate in SYSTEM_SERIF:
             if Path(candidate).exists():
                 return candidate, None
-        role = "sans"                        # no serif anywhere — fall through
+        role = "sans"
     local = _fetch_font("Inter.ttf")
     if local:
         return str(local), None
@@ -269,7 +269,7 @@ def _face(role: str) -> tuple[str | None, str | None]:
 ROLES: Final[dict[str, tuple[str, str | None]]] = {
     "title":    ("serif", "Black"),
     "subtitle": ("serif", "Medium"),
-    "hero":     ("sans", "Black"),      # the pass numeral
+    "hero":     ("sans", "Black"),
     "strong":   ("sans", "Bold"),
     "label":    ("sans", "Medium"),
 }
@@ -289,7 +289,7 @@ def font(role: str, size: int) -> Any:
     if weight:
         try:
             fnt.set_variation_by_name(weight)
-        except Exception:                    # noqa: BLE001 — static face, fine
+        except Exception:
             pass
     return fnt
 
@@ -361,9 +361,9 @@ def _raqm_available() -> bool:
             return False
         probe = Image.new("L", (8, 8), 0)
         ImageDraw.Draw(probe).text((0, 0), "0", font=font("label", 8), fill=255,
-                                   features=OT_FEATURES)
+                                  features=OT_FEATURES)
         return True
-    except Exception:                        # noqa: BLE001 — no Raqm, no features
+    except Exception:
         return False
 
 
@@ -376,7 +376,7 @@ def ot_len(draw: ImageDraw.ImageDraw, text: str, fnt: Any) -> float:
     if features_ok():
         try:
             return draw.textlength(text, font=fnt, features=OT_FEATURES)
-        except Exception:                    # noqa: BLE001
+        except Exception:
             pass
     return draw.textlength(text, font=fnt)
 
@@ -388,7 +388,7 @@ def ot_text(draw: ImageDraw.ImageDraw, xy: tuple[float, float], text: str,
             draw.text(xy, text, font=fnt, fill=fill, anchor=anchor,
                       features=OT_FEATURES)
             return
-        except Exception:                    # noqa: BLE001
+        except Exception:
             pass
     draw.text(xy, text, font=fnt, fill=fill, anchor=anchor)
 
@@ -562,7 +562,7 @@ def header_art() -> Image.Image | None:
 
 
 # =============================================================================
-# 4. GATE SECURITY  (HMAC payload + abstract security print)
+# 4. GATE SECURITY
 # =============================================================================
 
 
@@ -671,7 +671,7 @@ def _draw_gold_rule(canvas: Image.Image, box: tuple[float, float, float, float],
                     radius: int, width: int) -> None:
     mask = Image.new("L", canvas.size, 0)
     ImageDraw.Draw(mask).rounded_rectangle(box, radius=radius,
-                                         outline=255, width=width)
+                                          outline=255, width=width)
     canvas.paste(gold_ramp(canvas.size), (0, 0), mask)
 
 
@@ -736,7 +736,7 @@ def build_ticket_jpeg(row: pd.Series) -> bytes:
                  font("label", 15 * s), RGB_GOLD, tracking=4.6 * s)
 
     title_font, title_text = fit_text(draw, EVENT_NAME, "title", avail,
-                                     76 * s, 34 * s)
+                                      76 * s, 34 * s)
     draw_embossed(canvas, (lx, 76 * s), title_text, title_font,
                   glow=9 * s, emboss=3 * s)
     draw = ImageDraw.Draw(canvas)
@@ -751,7 +751,7 @@ def build_ticket_jpeg(row: pd.Series) -> bytes:
     draw_tracked(draw, (lx, 208 * s), venue_text, venue_font, RGB_MUTED,
                  tracking=2.2 * s)
 
-    when = f"{EVENT_DATE.upper()}    ·    {EVENT_TIME.upper()}    ·    GATES OPEN 60 MIN PRIOR"
+    when = f"{EVENT_DATE.upper()}   ·   {EVENT_TIME.upper()}   ·   GATES OPEN 60 MIN PRIOR"
     when_font, when_text = fit_tracked(draw, when, "label", avail,
                                        16 * s, 10 * s, 2.2 * s)
     draw_tracked(draw, (lx, 234 * s), when_text, when_font, (196, 170, 104),
@@ -948,7 +948,7 @@ def resolve_scan(raw: str, allow_manual: bool) -> tuple[str | None, str]:
     if seat:
         return seat, "qr"
     if str(raw).strip().upper().startswith("VALIDATE"):
-        return None, "bad"                        # looked like a pass, failed HMAC
+        return None, "bad"
     if allow_manual:
         manual = normalise_seat(raw)
         if manual:
@@ -959,7 +959,7 @@ def resolve_scan(raw: str, allow_manual: bool) -> tuple[str | None, str]:
 def mark_checkin(seat_id: str) -> tuple[str, dict[str, Any]]:
     try:
         df = load_seats(fresh=True)
-    except Exception as exc:                    # noqa: BLE001 — surface at the gate
+    except Exception as exc:
         return FAILED, {"seat_id": seat_id, "note": f"Sheet unreachable: {exc}"}
 
     hit = df[df["seat_id"] == seat_id]
@@ -994,7 +994,7 @@ def mark_checkin(seat_id: str) -> tuple[str, dict[str, Any]]:
         if back.empty or not str(back.iloc[0]["checkin_time"]).strip():
             info["note"] = "Write did not stick. Scan again."
             return FAILED, info
-    except Exception as exc:                    # noqa: BLE001
+    except Exception as exc:
         info["note"] = f"Could not write check-in: {exc}"
         return FAILED, info
 
@@ -1011,7 +1011,7 @@ def undo_checkin(seat_id: str) -> tuple[bool, str]:
         df.loc[hit.index[0], "checkin_time"] = ""
         save_seats(df)
         return True, f"Check-in cleared for {seat_id}. The guest can scan again."
-    except Exception as exc:                    # noqa: BLE001
+    except Exception as exc:
         return False, f"Could not clear check-in: {exc}"
 
 
@@ -1056,9 +1056,9 @@ def inject_theme(intro: bool = False) -> None:
     [data-testid="stMain"] {{ background-color:{OBSIDIAN} !important; }}
     .stApp {{
         background-image:
-         radial-gradient(1200px 700px at 4% -14%, rgba(212,175,55,.17), transparent 60%),
-         radial-gradient(900px 620px at 99% 2%, rgba(47,107,255,.14), transparent 62%),
-         radial-gradient(1100px 620px at 46% 112%, rgba(31,191,117,.12), transparent 64%) !important;
+          radial-gradient(1200px 700px at 4% -14%, rgba(212,175,55,.17), transparent 60%),
+          radial-gradient(900px 620px at 99% 2%, rgba(47,107,255,.14), transparent 62%),
+          radial-gradient(1100px 620px at 46% 112%, rgba(31,191,117,.12), transparent 64%) !important;
         color:#ECE7DA !important;
     }}
     [data-testid="stHeader"], header[data-testid="stHeader"] {{
@@ -1096,7 +1096,7 @@ def inject_theme(intro: bool = False) -> None:
         animation:pillsheen 6s ease-in-out infinite, pillglow 3.2s ease-in-out infinite;
     }}
     @keyframes pillsheen {{ 0%,100%{{background-position:0% 50%}}
-                            50%{{background-position:100% 50%}} }}
+                          50%{{background-position:100% 50%}} }}
     @keyframes pillglow {{
         0%,100%{{box-shadow:0 0 14px rgba(212,175,55,.38),0 0 32px rgba(212,175,55,.14)}}
         50%    {{box-shadow:0 0 28px rgba(212,175,55,.70),0 0 62px rgba(212,175,55,.28)}}
@@ -1166,7 +1166,7 @@ def inject_theme(intro: bool = False) -> None:
     .verdict__icon {{ font-size:clamp(3rem,13vw,4.6rem); line-height:1;
                       display:block; margin-bottom:.5rem; }}
     .verdict__title {{ font-size:clamp(1.45rem,6.4vw,2.5rem); font-weight:900;
-                        letter-spacing:.14em; line-height:1.1; margin:0; }}
+                       letter-spacing:.14em; line-height:1.1; margin:0; }}
     .verdict__seat {{ font-family:'Playfair Display', Georgia, serif;
                       font-size:clamp(2.6rem,12vw,4.2rem); font-weight:900;
                       line-height:1; margin:.6rem 0 .1rem;
@@ -1309,11 +1309,11 @@ def inject_theme(intro: bool = False) -> None:
                            50%{{background-position:100% 50%}} }}
     @keyframes ctapulse {{
         0%,100% {{ box-shadow:0 16px 40px -10px rgba(212,175,55,.6),
-                            0 0 0 0 rgba(212,175,55,.44),
-                            inset 0 1px 0 rgba(255,255,255,.7); }}
+                              0 0 0 0 rgba(212,175,55,.44),
+                              inset 0 1px 0 rgba(255,255,255,.7); }}
         50%     {{ box-shadow:0 20px 54px -8px rgba(212,175,55,.85),
-                            0 0 0 18px rgba(212,175,55,0),
-                            inset 0 1px 0 rgba(255,255,255,.7); }} }}
+                              0 0 0 18px rgba(212,175,55,0),
+                              inset 0 1px 0 rgba(255,255,255,.7); }} }}
     .stFormSubmitButton button::after {{
         content:""; position:absolute; top:0; left:-60%; width:36%; height:100%;
         background:linear-gradient(105deg, transparent,
@@ -1370,23 +1370,6 @@ def inject_theme(intro: bool = False) -> None:
     [data-testid="stDataFrame"] {{ border:1px solid rgba(212,175,55,.22);
         border-radius:14px; overflow:hidden; }}
     hr {{ border-color:rgba(212,175,55,.14) !important; }}
-
-    /* ============ FOOTER 4-PHOTO GRID (HALF SIZE) ============ */
-    .footer-photos {{
-        display: flex;
-        justify-content: center;
-        gap: 12px;
-        margin-top: 1.2rem;
-        flex-wrap: wrap;
-    }}
-    .footer-photos img {{
-        width: 45px !important;
-        height: 45px !important;
-        object-fit: cover;
-        border-radius: 10px;
-        border: 1px solid rgba(212,175,55,.3);
-        box-shadow: 0 4px 12px rgba(0,0,0,.5);
-    }}
 
     @keyframes vipVeil {{ from {{ opacity:1; }}
                         to   {{ opacity:0; visibility:hidden; }} }}
@@ -1467,46 +1450,54 @@ def banner(path: Path, fallback: str) -> None:
               f"font-weight:900;color:{GOLD_SOFT};'>{esc(fallback)}</div>")
 
 
-# --- NAYA HEADER TEXT FUNCTION ---
-def render_top_header_text() -> None:
-    _html(f"""
-    <div style="text-align:center; margin-bottom: 1.2rem;">
-      <div style="font-family:'Playfair Display', Georgia, serif; font-size:1.1rem; font-weight:700; color:#FFF8E7; letter-spacing:0.05em;">
-        All India gramin Cricket league Khelo gramin.
-      </div>
-      <div style="font-size:0.85rem; font-weight:800; letter-spacing:0.15em; margin-top:0.2rem;">
-        <span style="color:#2FE08D;">Aigcl ..green</span> &nbsp;&middot;&nbsp; 
-        <span style="color:#FF4D5E;">Khelo gramin..red</span>
-      </div>
+# =============================================================================
+# NEW ADDITION: TOP LEAGUE TITLE & FOOTER SPONSORS/GALLERY
+# =============================================================================
+
+def render_top_titles() -> None:
+    _html("""
+    <div style="text-align:center; margin-bottom: 1.5rem;">
+      <h1 style="font-family:'Playfair Display',serif; color:#D4AF37; font-size:1.8rem; font-weight:900; margin:0; line-height:1.2;">
+        All India Gramin Cricket League<br>
+        <span style="color:#1FBF75; font-size:1.3rem;">Khelo Gramin</span>
+      </h1>
+      <p style="font-family:Inter,sans-serif; font-size:0.85rem; font-weight:700; letter-spacing:0.15em; margin-top:0.5rem; text-transform:uppercase;">
+        <span style="color:#1FBF75;">AIGCL Green</span> &nbsp;&middot;&nbsp; 
+        <span style="color:#FF4D5E;">Khelo Gramin Red</span>
+      </p>
     </div>
     """)
 
 
-# --- NAYA FOOTER PHOTOS FUNCTION (4 PHOTOS) ---
-def render_footer_photos() -> None:
-    # Yahan par apni 4 photos ke filenames ya paths dein (assets folder ya local folder mein hone chahiye)
-    p1 = ASSET_DIR / "sponsor1.png"
-    p2 = ASSET_DIR / "sponsor2.png"
-    p3 = ASSET_DIR / "sponsor3.png"
-    p4 = ASSET_DIR / "sponsor4.png"
-
-    # Agar files nahi hain toh placeholder ya safe check, par aap images rakh sakte hain:
-    html_imgs = ""
-    for img_path in [p1, p2, p3, p4]:
-        if img_path.exists():
-            # Base64 convert karke direct embed karna sabse safe hota hai html tags mein
-            import base64
-            encoded = base64.b64encode(img_path.read_bytes()).decode("ascii")
-            html_imgs += f'<img src="data:image/png;base64,{encoded}" />'
-        else:
-            # Fallback agar file na mile toh chhota box dikhega
-            html_imgs += '<div style="width:45px;height:45px;background:rgba(212,175,55,0.1);border-radius:10px;border:1px solid rgba(212,175,55,0.3);"></div>'
-
-    _html(f"""
-    <div class="footer-photos">
-      {html_imgs}
+def render_sponsors_and_gallery() -> None:
+    # 5 Logos Section
+    _html("""
+    <div style="margin-top:2.5rem; text-align:center;">
+      <div class="eyebrow" style="margin-bottom:1rem;">Official Partners & Supporters</div>
+      <div style="display:flex; justify-content:center; align-items:center; gap:1.2rem; flex-wrap:wrap; opacity:0.85;">
+        <div style="font-weight:800; font-size:0.75rem; padding:10px 16px; background:rgba(255,255,255,0.04); border-radius:10px; border:1px solid rgba(212,175,55,0.25); color:#EFE8D8;">LOGO 1</div>
+        <div style="font-weight:800; font-size:0.75rem; padding:10px 16px; background:rgba(255,255,255,0.04); border-radius:10px; border:1px solid rgba(212,175,55,0.25); color:#EFE8D8;">LOGO 2</div>
+        <div style="font-weight:800; font-size:0.75rem; padding:10px 16px; background:rgba(255,255,255,0.04); border-radius:10px; border:1px solid rgba(212,175,55,0.25); color:#EFE8D8;">LOGO 3</div>
+        <div style="font-weight:800; font-size:0.75rem; padding:10px 16px; background:rgba(255,255,255,0.04); border-radius:10px; border:1px solid rgba(212,175,55,0.25); color:#EFE8D8;">LOGO 4</div>
+        <div style="font-weight:800; font-size:0.75rem; padding:10px 16px; background:rgba(255,255,255,0.04); border-radius:10px; border:1px solid rgba(212,175,55,0.25); color:#EFE8D8;">LOGO 5</div>
+      </div>
     </div>
     """)
+
+    # 4 Photos Section (Half size / 2 columns grid layout)
+    _html("""
+    <div style="margin-top:2.5rem; text-align:center;">
+      <div class="eyebrow" style="margin-bottom:1rem;">Glimpses & Highlights</div>
+    </div>
+    """)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("<div class='glass' style='text-align:center; padding:3rem 1rem; font-size:0.75rem; color:rgba(236,231,218,0.5); border-radius:14px;'>PHOTO 1 (Half Size)</div>", unsafe_allow_html=True)
+        st.markdown("<div class='glass' style='text-align:center; padding:3rem 1rem; font-size:0.75rem; color:rgba(236,231,218,0.5); border-radius:14px;'>PHOTO 2 (Half Size)</div>", unsafe_allow_html=True)
+    with col2:
+        st.markdown("<div class='glass' style='text-align:center; padding:3rem 1rem; font-size:0.75rem; color:rgba(236,231,218,0.5); border-radius:14px;'>PHOTO 3 (Half Size)</div>", unsafe_allow_html=True)
+        st.markdown("<div class='glass' style='text-align:center; padding:3rem 1rem; font-size:0.75rem; color:rgba(236,231,218,0.5); border-radius:14px;'>PHOTO 4 (Half Size)</div>", unsafe_allow_html=True)
 
 
 def hero() -> None:
@@ -2256,7 +2247,7 @@ def render_claim(df: pd.DataFrame) -> None:
 
 
 # =============================================================================
-# 12. ADMIN
+# 12. ADMIN  —  gate scanner, guest list, database
 # =============================================================================
 
 SCAN_RESULT: Final[str] = "gate_result"
@@ -2361,7 +2352,7 @@ def render_log() -> None:
 
 def salt_fingerprint() -> str:
     return hashlib.sha256(("fingerprint|" + SECURITY_SALT).encode("utf-8")
-                         ).hexdigest()[:8].upper()
+                          ).hexdigest()[:8].upper()
 
 
 def explain_payload(raw: str) -> list[tuple[str, bool, str]]:
@@ -2427,7 +2418,7 @@ def note_arrival(raw: str, source: str) -> None:
 def reload_seats(fallback: pd.DataFrame) -> pd.DataFrame:
     try:
         return load_seats()
-    except Exception:                        # noqa: BLE001
+    except Exception:
         return fallback
 
 
@@ -2601,7 +2592,7 @@ def guest_table(df: pd.DataFrame) -> pd.DataFrame:
     booked["arrived"] = booked["checkin_time"].astype(str).str.strip().ne("").map(
         {True: "✅ In", False: "—"})
     return booked[["seat_id", "name", "organisation", "phone", "booked_at",
-                    "arrived", "checkin_time"]].rename(
+                   "arrived", "checkin_time"]].rename(
         columns={"seat_id": "Pass", "name": "Name",
                  "organisation": "Organisation", "phone": "Phone",
                  "booked_at": "Issued", "arrived": "Status",
@@ -2726,18 +2717,15 @@ def main() -> None:
     if intro:
         splash_overlay()
 
-    # --- 1. SABSE UPR NAYA HEADER TEXT ---
-    render_top_header_text()
-
-    # --- 2. BANNER ---
+    # --- Naye Titles Header Banner ke theek upar add kiye gaye hain ---
+    render_top_titles()
     banner(HEADER_IMG, EVENT_NAME.upper())
 
     try:
         df = load_seats()
-    except Exception as exc:                    # noqa: BLE001
+    except Exception as exc:
         st.error(f"Could not read the Google Sheet: {exc}", icon="🔌")
         banner(FOOTER_IMG, VENUE.upper())
-        render_footer_photos()  # Footer photos yahan bhi
         st.stop()
         return
 
@@ -2753,10 +2741,10 @@ def main() -> None:
             render_admin(df)
 
     st.divider()
-    
-    # --- 3. FOOTER BANNER AUR USKE NICHE 4 PHOTOS ---
     banner(FOOTER_IMG, VENUE.upper())
-    render_footer_photos()
+    
+    # --- Footer Banner ke niche 5 Logos aur 4 Photos (Half-size grid) add kiye gaye hain ---
+    render_sponsors_and_gallery()
 
 
 if __name__ == "__main__":
