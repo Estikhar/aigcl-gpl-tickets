@@ -66,6 +66,9 @@
      sponsor3.png          sponsor logo 3
      sponsor4.png          sponsor logo 4
      sponsor5.png          sponsor logo 5
+     sponsor6.png          sponsor logo 6
+     sponsor7.png          sponsor logo 7
+     sponsor8.png          sponsor logo 8
      assets/*.ttf          OPTIONAL. Fetched once on first run if absent.
 ================================================================================
 """
@@ -1686,8 +1689,8 @@ def render_top_branding() -> None:
 
 
 def render_sponsors() -> None:
-    """Renders 5 sponsor images side-by-side (forced single row on mobile)."""
-    sponsor_paths = [BASE_DIR / f"sponsor{i}.png" for i in range(1, 6)]
+    """Renders 8 sponsor images in a responsive flex grid."""
+    sponsor_paths = [BASE_DIR / f"sponsor{i}.png" for i in range(1, 9)]
     valid_paths = [p for p in sponsor_paths if p.exists()]
     
     if not valid_paths:
@@ -1702,13 +1705,13 @@ def render_sponsors() -> None:
                 encoded = base64.b64encode(f.read()).decode("utf-8")
             img_tags.append(
                 f'<img src="data:image/png;base64,{encoded}" '
-                f'style="flex: 1; max-width: 18%; object-fit: contain; border-radius: 8px;">'
+                f'style="flex: 1 1 20%; max-width: 80px; min-width: 50px; object-fit: contain; border-radius: 8px;">'
             )
         except OSError:
             continue
             
     if img_tags:
-        _html(f'<div style="display: flex; flex-wrap: nowrap; justify-content: center; align-items: center; gap: 2%; width: 100%;">'
+        _html(f'<div style="display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 10px; width: 100%;">'
               f'{"".join(img_tags)}</div>')
 
 
